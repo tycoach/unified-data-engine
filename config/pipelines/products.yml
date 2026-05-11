@@ -1,0 +1,35 @@
+# config/pipelines/products.yml
+# Products dimension pipeline — SCD Type 1 (overwrite on change)
+# Natural key: product_id
+
+pipeline_id: products
+kafka_topic: raw.products
+subscription_id: raw.products-sub
+natural_key: product_id
+scd_type: 1
+edge_case_mode: quarantine
+null_threshold: 0.02
+late_arrival_window: 24h
+duplicate_window: 30m
+
+dbt:
+  snapshot: null
+  staging_model: products_staged
+  mart_model: dim_products
+  snapshot_strategy: null
+  invalidate_hard_deletes: false
+  tests:
+    - not_null: [product_id, sku, price]
+    - unique: [product_id]
+
+schema:
+  locked_version: null
+  locked_at: null
+fields:
+  product_id: { type: string, nullable: false }
+  sku:        { type: string, nullable: false }
+  name:       { type: string, nullable: true }
+  category:   { type: string, nullable: true }
+  price:      { type: float,  nullable: false }
+  in_stock:   { type: boolean, nullable: true }
+  updated_at: { type: datetime, nullable: false }

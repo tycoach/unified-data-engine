@@ -1,0 +1,14 @@
+# monitoring/grafana/provisioning/dashboards/dashboards.yml
+# Auto-loads UDE dashboard JSON files on Grafana startup
+
+apiVersion: 1
+
+providers:
+  - name: UDE Dashboards
+    folder: UDE v2
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,112 @@
+# monitoring/prometheus/alerts.yml
+# Alerting rules for UDE v2
+# Covers: quarantine rate, dbt failures, schema drift, batch timing
+
+groups:
+  - name: ude_engine_alerts
+    rules:
+
+      # ── Quarantine rate > 10% in a single batch ─────────────────────────
+      - alert: HighQuarantineRate
+        expr: ude_quarantine_rate > 0.10
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High quarantine rate on {{ $labels.pipeline_id }}"
+          description: >
+            Quarantine rate is {{ $value | humanizePercentage }} for pipeline
+            {{ $labels.pipeline_id }}. Threshold is 10%.
+            Check quarantine.{{ $labels.pipeline_id }}_quarantine for details.
+
+      # ── Batch processing time > 60 seconds ──────────────────────────────
+      - alert: SlowBatchProcessing
+        expr: histogram_quantile(0.95, ude_batch_duration_seconds_bucket) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow batch processing on {{ $labels.pipeline_id }}"
+          description: >
+            p95 batch duration is {{ $value }}s for pipeline
+            {{ $labels.pipeline_id }}. Threshold is 60s.
+
+      # ── Schema deviation detected ────────────────────────────────────────
+      - alert: SchemaDeviationDetected
+        expr: increase(ude_schema_deviation_total{status="BROKEN"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "BROKEN schema deviation on {{ $labels.pipeline_id }}"
+          description: >
+            A BROKEN schema deviation was detected on pipeline
+            {{ $labels.pipeline_id }}. Batch quarantined.
+            Operator action required at POST /schema/{{ $labels.pipeline_id }}/approve-migration
+
+      # ── dbt test failure ─────────────────────────────────────────────────
+      - alert: DbtTestFailure
+        expr: increase(ude_dbt_test_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "dbt test failure on {{ $labels.pipeline_id }}"
+          description: >
+            dbt test {{ $labels.test_name }} failed on model {{ $labels.model }}
+            for pipeline {{ $labels.pipeline_id }}.
+            Batch not checkpointed — will be reprocessed next cycle.
+
+      # ── dbt run exceeds 25s (within 30s window) ──────────────────────────
+      - alert: DbtRunExceedsWindow
+        expr: histogram_quantile(0.95, ude_dbt_run_duration_seconds_bucket) > 25
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "dbt run approaching batch window limit"
+          description: >
+            dbt p95 run duration is {{ $value }}s for pipeline
+            {{ $labels.pipeline_id }}. Approaching 30s micro-batch window.
+
+      # ── Snapshot open/close mismatch ─────────────────────────────────────
+      - alert: SnapshotMismatch
+        expr: |
+          abs(
+            increase(ude_snapshot_records_opened_total[5m]) -
+            increase(ude_snapshot_records_closed_total[5m])
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Snapshot open/close mismatch on {{ $labels.pipeline_id }}"
+          description: >
+            Snapshot records opened != closed for pipeline
+            {{ $labels.pipeline_id }} snapshot {{ $labels.snapshot }}.
+            This indicates a bug in snapshot strategy.
+
+      # ── Zero rows processed (3 consecutive batches) ──────────────────────
+      - alert: ZeroRowsProcessed
+        expr: ude_dbt_model_rows_affected == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Zero rows processed on {{ $labels.pipeline_id }}"
+          description: >
+            Model {{ $labels.model }} in pipeline {{ $labels.pipeline_id }}
+            processed zero rows. Possible upstream delivery failure.
+
+      # ── dbt contract violation ────────────────────────────────────────────
+      - alert: DbtContractViolation
+        expr: increase(ude_dbt_contract_violations_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "dbt contract violation on {{ $labels.pipeline_id }}"
+          description: >
+            A dbt source contract violation was detected for column
+            {{ $labels.column }} in pipeline {{ $labels.pipeline_id }}.
+            The edge case gate may have a gap.

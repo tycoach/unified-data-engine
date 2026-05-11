@@ -1,0 +1,34 @@
+# config/pipelines/orders.yml
+# Orders fact pipeline — SCD Type 1 (append/overwrite)
+# Natural key: order_id
+
+pipeline_id: orders
+kafka_topic: raw.orders
+subscription_id: raw.orders-sub
+natural_key: order_id
+scd_type: 1
+edge_case_mode: quarantine
+null_threshold: 0.02
+late_arrival_window: 24h
+duplicate_window: 30m
+
+dbt:
+  snapshot: null
+  staging_model: orders_staged
+  mart_model: fct_orders
+  snapshot_strategy: null
+  invalidate_hard_deletes: false
+  tests:
+    - not_null: [order_id, customer_id, amount]
+    - unique: [order_id]
+
+schema:
+  locked_version: null
+  locked_at: null
+fields:
+  order_id:    { type: string,  nullable: false }
+  customer_id: { type: string,  nullable: false }
+  amount:      { type: float,   nullable: false }
+  currency:    { type: string,  nullable: true }
+  status:      { type: string,  nullable: false }
+  created_at:  { type: datetime, nullable: false }

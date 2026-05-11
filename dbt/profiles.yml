@@ -1,0 +1,17 @@
+unified_data_engine:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: /tmp/unified_data_engine_dev.duckdb
+      threads: 4
+      schema: main
+
+    prod:
+      type: bigquery
+      method: oauth
+      project: local-dev-project
+      dataset: marts
+      threads: 4
+      timeout_seconds: 300
+      location: US

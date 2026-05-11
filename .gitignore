@@ -1,0 +1,71 @@
+# Unified Data Engine v2 — .gitignore
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+*.env.local
+
+# Local state — never commit these
+.state/
+.schema_registry/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+/tmp/unified_data_engine_dev.duckdb
+/tmp/unified_data_engine_dev.duckdb.wal
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+
+# Docker
+docker-compose.override.yml
+
+# Grafana
+monitoring/grafana/grafana.db
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# MiniSky — local emulator state, not for repo
+.minisky/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynbdbt/.user.yml
+dbt/logs/
+
+# dbt personal files
+dbt/.user.yml
+dbt/package-lock.yml
+dbt/logs/

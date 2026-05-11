@@ -1,0 +1,36 @@
+version: 2
+
+sources:
+  - name: staging
+    schema: raw_staging
+    tables:
+      - name: customers_staged
+        columns:
+          - name: customer_id
+          - name: email
+          - name: city
+          - name: country
+          - name: tier
+          - name: updated_at
+          - name: batch_id
+
+      - name: orders_staged
+        columns:
+          - name: order_id
+          - name: customer_id
+          - name: amount
+          - name: currency
+          - name: status
+          - name: created_at
+          - name: batch_id
+
+      - name: products_staged
+        columns:
+          - name: product_id
+          - name: sku
+          - name: name
+          - name: category
+          - name: price
+          - name: in_stock
+          - name: updated_at
+          - name: batch_id

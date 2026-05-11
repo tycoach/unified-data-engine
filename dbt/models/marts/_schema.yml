@@ -1,0 +1,56 @@
+# dbt/models/marts/_schema.yml
+
+version: 2
+
+models:
+  - name: dim_customers
+    description: "SCD Type 1 customer dimension — latest state only"
+    columns:
+      - name: customer_id
+        data_tests:
+          - not_null
+          - unique
+      - name: email
+        data_tests:
+          - not_null
+      - name: tier
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['free', 'pro', 'enterprise']
+      - name: updated_at
+        data_tests:
+          - not_null
+
+  - name: fct_orders
+    description: "Orders fact table — append only"
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_id
+        data_tests:
+          - not_null
+      - name: amount
+        data_tests:
+          - not_null
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['pending', 'confirmed', 'shipped', 'delivered']
+
+  - name: dim_products
+    description: "SCD Type 1 product dimension — latest state only"
+    columns:
+      - name: product_id
+        data_tests:
+          - not_null
+          - unique
+      - name: sku
+        data_tests:
+          - not_null
+      - name: price
+        data_tests:
+          - not_null

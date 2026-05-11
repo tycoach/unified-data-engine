@@ -1,0 +1,30 @@
+# Ingestion
+google-cloud-pubsub==2.21.1
+
+# Data processing
+polars==0.20.31
+
+# Schema registry + metadata store
+sqlalchemy==2.0.31
+psycopg2-binary==2.9.9
+google-cloud-bigtable==2.23.1
+
+# dbt
+dbt-core==1.8.4
+dbt-bigquery==1.8.1
+dbt-duckdb==1.8.1
+
+# API layer
+fastapi==0.111.0
+uvicorn==0.30.1
+pydantic==2.7.4
+
+# Metrics
+prometheus-client==0.20.0
+
+# UI
+streamlit==1.36.0
+
+# Utilities
+python-dotenv==1.0.1
+pyyaml==6.0.1

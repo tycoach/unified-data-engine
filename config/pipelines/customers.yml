@@ -1,0 +1,38 @@
+# config/pipelines/customers.yml
+# Customer dimension pipeline — SCD Type 2
+# Natural key: customer_id
+# Schema inference on first batch, locked thereafter
+
+pipeline_id: customers
+kafka_topic: raw.customers
+subscription_id: raw.customers-sub
+natural_key: customer_id
+scd_type: 2
+edge_case_mode: quarantine
+null_threshold: 0.05
+late_arrival_window: 24h
+duplicate_window: 30m
+
+dbt:
+  snapshot: customers_snapshot
+  staging_model: customers_staged
+  mart_model: dim_customers
+  snapshot_strategy: timestamp
+  invalidate_hard_deletes: true
+  tests:
+    - not_null: [customer_id, updated_at]
+    - unique: [customer_id]
+    - accepted_values:
+        column: tier
+        values: [free, pro, enterprise]
+
+schema:
+  locked_version: null
+  locked_at: null
+fields:
+  customer_id: { type: string, nullable: false }
+  email:       { type: string, nullable: true }
+  city:        { type: string, nullable: true }
+  country:     { type: string, nullable: true }
+  tier:        { type: string, nullable: false }
+  updated_at:  { type: datetime, nullable: false }

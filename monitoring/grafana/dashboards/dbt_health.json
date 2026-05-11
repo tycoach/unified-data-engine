@@ -1,0 +1,98 @@
+{
+    "title": "UDE — dbt Health",
+    "uid": "ude-dbt-health",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "dbt Run Duration (p95)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ude_dbt_run_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95 {{ pipeline_id }} / {{ model_type }}"
+          }
+        ],
+        "alert": {
+          "conditions": [{"evaluator": {"params": [25], "type": "gt"}}],
+          "message": "dbt run approaching 30s window limit"
+        }
+      },
+      {
+        "id": 2,
+        "title": "dbt Test Failures",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "increase(ude_dbt_test_failures_total[5m])",
+            "legendFormat": "{{ test_name }} / {{ pipeline_id }}"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Snapshot Records Opened vs Closed",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "increase(ude_snapshot_records_opened_total[5m])",
+            "legendFormat": "opened {{ pipeline_id }}"
+          },
+          {
+            "expr": "increase(ude_snapshot_records_closed_total[5m])",
+            "legendFormat": "closed {{ pipeline_id }}"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "dbt Run Status (1=success, 0=failure)",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "ude_dbt_run_status",
+            "legendFormat": "{{ pipeline_id }}"
+          }
+        ],
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "thresholds": {
+            "steps": [
+              {"color": "red", "value": 0},
+              {"color": "green", "value": 1}
+            ]
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Contract Violations",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 8},
+        "targets": [
+          {
+            "expr": "increase(ude_dbt_contract_violations_total[5m])",
+            "legendFormat": "{{ pipeline_id }} / {{ column }}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Rows Affected per Model",
+        "type": "bargauge",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "ude_dbt_model_rows_affected",
+            "legendFormat": "{{ model }} / {{ pipeline_id }}"
+          }
+        ]
+      }
+    ]
+  }

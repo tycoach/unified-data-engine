@@ -1,0 +1,31 @@
+name: unified_data_engine
+version: '2.0.0'
+
+profile: unified_data_engine
+
+model-paths: ['models']
+snapshot-paths: ['snapshots']
+test-paths: ['tests']
+macro-paths: ['macros']
+analysis-paths: ['analyses']
+
+target-path: 'target'
+clean-targets: ['target', 'dbt_packages']
+
+models:
+  unified_data_engine:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: incremental
+      +schema: marts
+
+snapshots:
+  unified_data_engine:
+    +target_schema: snapshots
+    +strategy: timestamp
+
+vars:
+  batch_id: null
+  quarantine_schema: quarantine
