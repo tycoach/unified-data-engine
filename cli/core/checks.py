@@ -1,3 +1,4 @@
+# cli/core/checks.py
 """
 Pre-flight checks for the ude CLI.
 
@@ -27,12 +28,16 @@ from pathlib import Path
 def assert_stack_running(cfg: UDEConfig) -> None:
     """
     Check that the FastAPI control plane is reachable.
-    Raises StackNotRunningError with a helpful message if not.
+
+    Uses follow_redirects=True because FastAPI redirects /health → /health/
+    when the router is mounted with a trailing-slash route.
+    Raises StackNotRunningError with a helpful message if not reachable.
     """
     try:
         resp = httpx.get(
             f"{cfg.api_base_url}/health",
             timeout=3.0,
+            follow_redirects=True,
         )
         resp.raise_for_status()
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError):
@@ -46,11 +51,10 @@ def assert_minisky_alive(cfg: UDEConfig) -> None:
     Raises MiniskyNotRunningError if not reachable.
     """
     if not cfg.is_local:
-        return  # skip check in staging/production — real GCP is the target
+        return
 
     try:
-        resp = httpx.get(cfg.minisky_url, timeout=3.0)
-        # MiniSky returns 200 on its root — any response means it's up
+        resp = httpx.get(cfg.minisky_url, timeout=3.0, follow_redirects=True)
         _ = resp.status_code
     except (httpx.ConnectError, httpx.TimeoutException):
         raise MiniskyNotRunningError(cfg.minisky_url)
@@ -64,7 +68,6 @@ def assert_dbt_on_path() -> None:
     if shutil.which("dbt") is None:
         raise DbtNotFoundError()
 
-    # Also verify it actually runs — catches broken installs
     try:
         result = subprocess.run(
             ["dbt", "--version"],
@@ -80,6 +83,8 @@ def assert_dbt_on_path() -> None:
 def assert_project_exists() -> None:
     """
     Check that the current directory looks like a UDE project.
+    We look for config/engine.yml as the canonical marker.
+    Raises NoProjectError if not found.
     """
     markers = [
         Path("config/engine.yml"),

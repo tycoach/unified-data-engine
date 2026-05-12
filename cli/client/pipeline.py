@@ -27,21 +27,12 @@ class PipelineClient(UDEHttpClient):
         """
         List all registered pipelines.
 
-        Returns a list of pipeline summary objects:
-          [
-            {
-              "pipeline_id": "customers",
-              "scd_type": 2,
-              "enabled": true,
-              "schema_version": 3,
-              "last_batch_at": "2026-03-15T02:14:00Z",
-              "last_batch_records": 4995
-            },
-            ...
-          ]
+        Calls the base HTTP get() directly to avoid shadowing by the
+        typed get(pipeline_id) method defined below.
         """
-        result = self.get("/pipeline")
-        # FastAPI may return {"pipelines": [...]} or a bare list
+        result = UDEHttpClient.get(self, "/pipeline/")
+        if result is None:
+            return []
         if isinstance(result, list):
             return result
         return result.get("pipelines", [])
@@ -49,24 +40,17 @@ class PipelineClient(UDEHttpClient):
     def get(self, pipeline_id: str) -> dict | None:
         """
         Get full detail for one pipeline.
-
         Returns None if the pipeline is not found (404).
-        Raises APIError for other HTTP failures.
         """
         from cli.core.errors import APIError
         try:
-            return super().get(f"/pipeline/{pipeline_id}")
+            return UDEHttpClient.get(self, f"/pipeline/{pipeline_id}")
         except APIError as exc:
             if exc.status_code == 404:
                 return None
             raise
 
     def set_enabled(self, pipeline_id: str, enabled: bool) -> dict:
-        """
-        Enable or disable a pipeline.
-
-        Calls PATCH /pipeline/{id}/enable or /pipeline/{id}/disable.
-        Returns the updated pipeline object.
-        """
+        """Enable or disable a pipeline."""
         action = "enable" if enabled else "disable"
         return self.patch(f"/pipeline/{pipeline_id}/{action}")
