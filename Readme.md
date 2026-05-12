@@ -1,9 +1,10 @@
 # Unified Data Engine
 
-A GCP-native, dbt-powered micro-batch data pipeline engine. Register a pipeline with one YAML file. The engine handles the rest.
+A GCP-native, dbt-powered micro-batch data pipeline engine with a full operator CLI. Register a pipeline with one YAML file. The engine handles the rest.
 
 ```bash
-make up
+pip install unified-data-engine
+ude up
 ```
 
 ---
@@ -61,7 +62,8 @@ Adding a new pipeline = one YAML file + two dbt SQL files. Zero engine code chan
 | Batch processing | Polars | Schema inference, edge case validation |
 | Hot state | Bigtable (local: JSON files) | Schema versions, offsets, checkpoints |
 | Target store | BigQuery | Staging, snapshots, marts, quarantine |
-| API | FastAPI | Control plane — 15+ REST endpoints |
+| API | FastAPI | Control plane — 20+ REST endpoints |
+| CLI | Typer + Rich | `ude` — operator CLI, pip-installable |
 | Dashboard | Streamlit | Operator UI — 5 pages |
 | Metrics | Prometheus + Pushgateway | Engine + dbt metrics pipeline |
 | Dashboards | Grafana | 2 live dashboards (Engine Overview + dbt Health) |
@@ -97,43 +99,145 @@ cd unified-data-engine
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
-### 3. Start the monitoring stack (Prometheus + Grafana)
+This installs the engine dependencies and the `ude` CLI in one step.
+
+### 3. Start the monitoring stack
 
 ```bash
 docker compose up -d
 ```
 
-This starts:
-- **Prometheus** on `:9090` — scrapes engine metrics
-- **Prometheus Pushgateway** on `:9091` — receives metrics from engine batches
-- **Grafana** on `:3000` — visualizes everything (login: `admin` / `admin`)
+Starts Prometheus on `:9090`, Pushgateway on `:9091`, and Grafana on `:3000` (login: `admin` / `admin`).
 
-### 4. Start everything
+### 4. Provision MiniSky resources
+
+```bash
+make provision
+```
+
+Creates Pub/Sub topics, subscriptions, and BigQuery datasets on MiniSky. Run this every time MiniSky restarts — it loses state on shutdown.
+
+### 5. Start the stack
 
 ```bash
 make up
 ```
 
-`make up` runs in this order:
+Starts FastAPI on `:8000`, Streamlit on `:8501`, and the micro-batch engine loop.
 
-1. Starts MiniSky (local GCP emulator)
-2. Provisions Pub/Sub topics + BigQuery datasets on MiniSky
-3. Seeds DuckDB with test data (for dbt dev target)
-4. Installs dbt packages
-5. Starts FastAPI on `:8000`
-6. Starts Streamlit dashboard on `:8501`
-7. Starts the micro-batch engine loop
+### 6. Verify with the CLI
+
+```bash
+ude status
+```
+
+![ude status](assets/udee.png)
 
 ---
 
-## Quick Start
+## The CLI — `ude`
+
+The `ude` CLI ships with `pip install unified-data-engine` and gives operators full control from the terminal.
+
+![ude help](assets/ude-help.png)
+
+### Lifecycle
+
+```bash
+ude status                    # Stack health — all 6 components
+ude up                        # Start the stack
+ude down                      # Stop the stack
+ude seed                      # Publish synthetic test data to Pub/Sub
+ude init                      # Scaffold a new UDE project
+```
+
+### Pipeline management
+
+```bash
+ude pipeline list             # All pipelines with status + last batch
+ude pipeline inspect customers # Full config, schema fields, last batch detail
+ude pipeline new              # Interactive scaffold: YAML + dbt model stubs
+ude pipeline enable  orders   # Resume a paused pipeline
+ude pipeline disable products # Pause without deleting
+```
+
+![ude pipeline inspect](assets/ude_inspect_customer.png)
+
+### Schema operations
+
+```bash
+ude schema sync               # Regenerate dbt contracts from registry
+ude schema history customers  # Version timeline — INITIAL → EVOLVED → BROKEN
+ude schema diff    customers  # Locked schema vs what's arriving live
+ude schema approve customers  # Approve a BROKEN migration, unblock pipeline
+```
+
+![ude schema history](assets/ude_schema_history.png)
+
+### Quarantine management
+
+```bash
+ude quarantine list                        # All quarantined batches
+ude quarantine inspect <batch_id>          # Full detail + schema diff + records
+ude quarantine approve <batch_id>          # Release for replay
+ude quarantine reject  <batch_id>          # Discard permanently
+ude quarantine replay  <batch_id>          # Force immediate replay
+```
+
+### dbt commands
+
+```bash
+ude dbt run                   # Run all dbt models (auto-injects --profiles-dir, --vars)
+ude dbt test                  # Run dbt tests
+ude dbt snapshot              # Run dbt snapshots
+ude dbt docs                  # Generate + serve dbt docs
+ude dbt lineage               # Render model dependency DAG in terminal
+```
+
+![ude dbt help](assets/ude_dbt_help.png)
+
+### Live observability
+
+```bash
+ude observe watch             # Live batch feed — records, dbt, schema, quarantine rate
+ude observe logs              # Stream engine logs (filter by pipeline, level)
+ude observe metrics           # Prometheus metrics snapshot as a Rich table
+```
+
+![ude observe watch — live batch cycles](assets/ude_watch_live.png)
+
+![ude observe metrics](assets/ude_metrics_observe.png)
+
+### CLI config
+
+The CLI reads config from `~/.ude/config.yml`:
+
+```yaml
+host: localhost
+port: 8000
+env: local
+minisky_url: http://localhost:8080
+timeout: 30
+```
+
+Override with env vars (`UDE_HOST`, `UDE_PORT`) or `--host`/`--port` flags.
+
+---
+
+## Quick Start (after installation)
 
 ```bash
 # Publish synthetic test data to Pub/Sub
 make seed
+
+# Watch live batch cycles in the terminal
+ude observe watch
+
+# List all pipelines
+ude pipeline list
 
 # Open the operator dashboard
 open http://localhost:8501
@@ -143,14 +247,25 @@ open http://localhost:8000/docs
 
 # View live metrics in Grafana
 open http://localhost:3000   # admin / admin
-
-# View raw Prometheus metrics
-open http://localhost:8000/metrics
 ```
 
 ---
 
 ## Registering a New Pipeline
+
+### Option A — Interactive CLI (recommended)
+
+```bash
+ude pipeline new
+```
+
+Walks through all inputs and generates:
+- `config/pipelines/{id}.yml`
+- `dbt/models/staging/{id}_staged.sql`
+- `dbt/models/marts/dim_{id}.sql`
+- `dbt/snapshots/{id}_snapshot.sql` (SCD Type 2 only)
+
+### Option B — Manual YAML
 
 Drop a YAML file in `config/pipelines/`. No code changes.
 
@@ -171,10 +286,10 @@ dbt:
   snapshot: null
 
 fields:
-  product_id: { type: string,  nullable: false }
-  sku:        { type: string,  nullable: false }
-  name:       { type: string,  nullable: true }
-  price:      { type: float,   nullable: false }
+  product_id: { type: string,   nullable: false }
+  sku:        { type: string,   nullable: false }
+  name:       { type: string,   nullable: true }
+  price:      { type: float,    nullable: false }
   updated_at: { type: datetime, nullable: false }
 ```
 
@@ -195,14 +310,18 @@ For SCD Type 2, also add `dbt/snapshots/products_snapshot.sql`.
 | **EVOLVED** | New column added, type widened | Update registry, regenerate dbt contract, continue |
 | **BROKEN** | Column removed, type incompatible | Quarantine batch, alert operator, hold schema |
 
-Approving a BROKEN migration:
+Approving a BROKEN migration via CLI:
+
+```bash
+ude schema diff    customers   # Preview what changed
+ude schema approve customers   # Approve + unblock pipeline
+```
+
+Or via API:
 
 ```bash
 POST /schema/{pipeline_id}/approve-migration
-{
-  "reason": "Upstream removed column intentionally",
-  "updated_fields": { ... }
-}
+{ "reason": "Upstream removed column intentionally" }
 ```
 
 Or use the Quarantine page in the Streamlit dashboard.
@@ -220,6 +339,23 @@ Five pages at `http://localhost:8501`:
 | **Quarantine** | Dirty records with failure reasons, migration approval |
 | **Schema History** | Locked schemas, version timeline, dbt source contracts |
 | **dbt Lineage** | Model dependency DAG from manifest.json |
+
+---
+
+## API — Control Plane
+
+FastAPI at `http://localhost:8000/docs` — 20+ endpoints across 6 routers.
+
+| Router | Key endpoints |
+|---|---|
+| `/health` | Stack health, MiniSky connectivity |
+| `/pipeline` | List, inspect, enable/disable, batch history |
+| `/schema` | Locked schemas, history, diff, sync, approve migration |
+| `/quarantine` | List batches, inspect, approve, reject, replay |
+| `/dbt` | Trigger runs, status, lineage, artifacts |
+| `/metrics` | Raw Prometheus text (scraped by Prometheus) |
+| `/metrics/structured` | JSON metrics for CLI rendering |
+| `/logs/stream` | NDJSON log stream for `ude observe logs` |
 
 ---
 
@@ -319,7 +455,13 @@ unified-data-engine/
 │   ├── models/staging/         One view per dataset
 │   ├── models/marts/           SCD Type 1 incremental models
 │   └── snapshots/              SCD Type 2 snapshot declarations
-├── api/                        FastAPI — 5 routers, 15+ endpoints
+├── api/                        FastAPI — 20+ endpoints, 6 routers
+├── cli/                        ude CLI — Typer + Rich, pip-installable
+│   ├── commands/               One file per command group (6 groups)
+│   ├── client/                 HTTP client wrapping FastAPI endpoints
+│   ├── scaffold/               ude init + ude pipeline new generators
+│   ├── output/                 Rich tables, panels, live watch display
+│   └── core/                   Config, errors, checks, context
 ├── ui/                         Streamlit — 5 operator pages
 ├── monitoring/
 │   ├── prometheus/             prometheus.yml + alerts.yml (7 rules)
@@ -328,13 +470,31 @@ unified-data-engine/
 │       └── provisioning/       Auto-loaded datasources + dashboards
 ├── data-generator/
 │   └── scenarios/              happy_path.py, products.py
-├── scripts/                    Phase test scripts
-├── terraform/                  Infra-as-code for MiniSky + GCP
+├── scripts/                    Phase test scripts + verify_install.sh
+├── terraform/                  Infra-as-code for MiniSky + real GCP
+├── tests/
+│   ├── unit/cli/               92 passing unit tests (config, checks, scaffold)
+│   └── integration/cli/        Integration test stubs (run with stack live)
+├── assets/                     CLI screenshots for documentation
 ├── docker-compose.yml          Monitoring stack (Prometheus + Grafana)
+├── pyproject.toml              Package manifest — makes pip install work
 ├── Makefile
 ├── requirements.txt
 └── .env.example
 ```
+
+---
+
+## MiniSky — Important Notes
+
+MiniSky loses all Pub/Sub and BigQuery state on restart. After every restart:
+
+```bash
+minisky start
+make provision    # recreate topics, subscriptions, datasets
+```
+
+The engine will get 404s on every pull until provisioning is complete. This is expected behaviour — `make provision` is idempotent and safe to run multiple times.
 
 ---
 
@@ -351,14 +511,25 @@ No engine code changes needed:
 
 ## Why UDE?
 
-| Problem | UDE  solution |
+| Problem | UDE solution |
 |---|---|
 | Writing SCD MERGE SQL for every dataset | dbt snapshots + incremental — zero custom SQL |
 | Schema changes breaking pipelines silently | MATCH / EVOLVED / BROKEN on every batch |
 | Nulls, duplicates, late arrivals handled inconsistently | Edge case gate — configurable per pipeline |
-| New pipeline takes days to set up | One YAML file — engine handles the rest |
-| No visibility into what's happening | FastAPI + Streamlit + Prometheus + Grafana |
+| New pipeline takes days to set up | `ude pipeline new` — interactive scaffold in 2 minutes |
+| No visibility into what's happening | CLI + FastAPI + Streamlit + Prometheus + Grafana |
+| Operator commands require SSH + curl | `ude quarantine approve`, `ude schema diff` from anywhere |
 | Vendor lock-in to expensive platforms | 100% open source, GCP-native, MiniSky for local dev |
+
+---
+
+## Releases
+
+| Version | What shipped |
+|---|---|
+| `v1.2.0` | Full end-to-end verified — live batch cycles, `ude observe watch` live |
+| `v1.0.0` | FastAPI endpoints wired for CLI — all commands connected to live stack |
+| `v1.0.0-cli` | `ude` CLI complete — 92/92 unit tests, all 6 command groups |
 
 ---
 
