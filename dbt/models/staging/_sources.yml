@@ -1,36 +1,63 @@
+# dbt/models/staging/_sources.yml
+# AUTO-MANAGED by UDE schema registry
+# Last updated: 2026-05-12T14:34:51.340631+00:00
+# DO NOT EDIT columns manually — use make schema-sync
+
 version: 2
-
 sources:
-  - name: staging
-    schema: raw_staging
-    tables:
-      - name: customers_staged
-        columns:
-          - name: customer_id
-          - name: email
-          - name: city
-          - name: country
-          - name: tier
-          - name: updated_at
-          - name: batch_id
-
-      - name: orders_staged
-        columns:
-          - name: order_id
-          - name: customer_id
-          - name: amount
-          - name: currency
-          - name: status
-          - name: created_at
-          - name: batch_id
-
-      - name: products_staged
-        columns:
-          - name: product_id
-          - name: sku
-          - name: name
-          - name: category
-          - name: price
-          - name: in_stock
-          - name: updated_at
-          - name: batch_id
+- name: staging
+  schema: raw_staging
+  tables:
+  - name: customers_staged
+    columns:
+    - name: customer_id
+    - name: email
+    - name: city
+    - name: country
+    - name: tier
+    - name: updated_at
+    - name: batch_id
+  - name: orders_staged
+    description: "Orders source \u2014 schema v1 (locked 2026-05-12)"
+    config:
+      contract:
+        enforced: true
+    columns:
+    - name: order_id
+      data_type: varchar
+      constraints:
+      - type: not_null
+      - type: unique
+    - name: customer_id
+      data_type: varchar
+      constraints:
+      - type: not_null
+      - type: unique
+    - name: amount
+      data_type: float64
+      constraints:
+      - type: not_null
+    - name: currency
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: status
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: created_at
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: batch_id
+      data_type: varchar
+  - name: products_staged
+    columns:
+    - name: product_id
+    - name: sku
+    - name: name
+    - name: category
+    - name: price
+    - name: in_stock
+    - name: updated_at
+    - name: batch_id
