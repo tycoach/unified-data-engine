@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "unified-data-engine"
+version = "2.0.0"
+description = "A GCP-native, dbt-powered micro-batch data pipeline engine"
+readme = "Readme.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Taiwo Hassan", email = "Davidtaiwo56@gmail.com" }
+]
+keywords = ["dbt", "data-engineering", "gcp", "pipeline", "scd"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Core deps — always installed with pip install unified-data-engine
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0.1",
+    "jinja2>=3.1.4",
+    "click>=8.1.7",
+]
+
+[project.optional-dependencies]
+# pip install unified-data-engine[gcp]
+# Needed for commands that talk directly to GCP (not via the FastAPI stack)
+gcp = [
+    "google-cloud-pubsub>=2.21.0",
+    "google-cloud-bigquery>=3.20.0",
+    "google-cloud-bigtable>=2.23.0",
+]
+
+# pip install unified-data-engine[dev]
+# Everything needed to develop and test the CLI
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-httpx>=0.30.0",
+    "ruff>=0.4.0",
+    # mypy and pre-commit intentionally excluded from dev extras —
+    # they pull in pathspec>=1.0 which conflicts with dbt-core's
+    # pathspec<0.13 requirement. Install separately if needed:
+    #   pip install mypy pre-commit --constraint constraints.txt
+]
+
+# pip install unified-data-engine[all]
+all = [
+    "unified-data-engine[gcp]",
+    "unified-data-engine[dev]",
+]
+
+[project.scripts]
+# This is what makes `ude` work after pip install
+ude = "cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/tycoach/unified-data-engine"
+Repository = "https://github.com/tycoach/unified-data-engine"
+Issues = "https://github.com/tycoach/unified-data-engine/issues"
+
+[tool.hatch.build.targets.wheel]
+# Only ship the cli/ package in the wheel
+# Engine, API, UI are not part of the pip-installable CLI
+packages = ["cli"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.per-file-ignores]
+"tests/*" = ["S101"]  # allow assert in tests
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
