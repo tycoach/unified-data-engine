@@ -3,24 +3,31 @@
 Observability endpoints — new router for CLI observe commands.
 
 Routes:
-    GET  /metrics/structured   — Prometheus metrics as structured JSON
+    GET  /metrics/structured   — UDE metrics scraped from Pushgateway as JSON
     GET  /logs/stream          — NDJSON log stream for ude observe logs
+
+structured metrics scrapes Pushgateway (:9091) directly instead of
+walking the FastAPI process registry. The engine pushes all UDE metrics to
+Pushgateway after each batch — FastAPI's own registry only has Go/Python
+internals and would always return empty for UDE-specific metrics.
 """
 
 import json
 import logging
+import os
 import re
+import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
-from prometheus_client import REGISTRY
 
 metrics_router = APIRouter()
 logs_router    = APIRouter()
+logger         = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
+PUSHGATEWAY_URL = os.getenv("PUSHGATEWAY_URL", "http://localhost:9091")
 
 
 # ── GET /metrics/structured ───────────────────────────────────────────────────
@@ -30,13 +37,19 @@ def structured_metrics(
     pipeline_id: Optional[str] = Query(None, description="Filter by pipeline"),
 ):
     """
-    Parse Prometheus metrics and return structured JSON.
-    The raw /metrics endpoint stays for Prometheus scraping.
-    CLI uses this for ude observe metrics.
+    Scrape Pushgateway and return UDE metrics as structured JSON.
+
+    Pushgateway holds all engine batch metrics pushed after each cycle.
+    Filters to ude_* metrics only — skips Go/Python process internals.
+
     """
-    metrics = _parse_prometheus_registry(pipeline_id=pipeline_id)
+    metrics, error = _scrape_pushgateway(pipeline_id=pipeline_id)
+
     return {
         "scraped_at": datetime.now(timezone.utc).isoformat(),
+        "source":     "pushgateway",
+        "pushgateway": PUSHGATEWAY_URL,
+        "error":      error,
         "metrics":    metrics,
         "total":      len(metrics),
     }
@@ -71,49 +84,126 @@ def stream_logs(
     )
 
 
-# ── Private helpers ───────────────────────────────────────────────────────────
+# ── Pushgateway scraper ───────────────────────────────────────────────────────
 
-_UDE_METRIC_PREFIXES = (
+_UDE_PREFIXES = (
     "ude_batch",
     "ude_quarantine",
     "ude_schema",
     "ude_dbt",
     "ude_snapshot",
     "ude_checkpoint",
+    "ude_staging",
+    "ude_pubsub",
+    "ude_null",
+    "ude_duplicate",
+    "ude_late",
+    "ude_active",
 )
 
-_LEVEL_ORDER = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
+# Metric types that produce _sum, _count, _bucket suffixes we want to skip
+# in favour of the clean metric name
+_SKIP_SUFFIXES = ("_bucket", "_created", "_count", "_sum", "_seconds_sum", "_duration_sum")
+
+# Map Prometheus metric line format:
+# metric_name{label="value",...} numeric_value [timestamp]
+_METRIC_RE = re.compile(
+    r'^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)'
+    r'(?:\{(?P<labels>[^}]*)\})?\s+'
+    r'(?P<value>[0-9eE+\-\.]+(?:Inf)?)'
+)
 
 
-def _parse_prometheus_registry(pipeline_id: Optional[str] = None) -> list[dict]:
-    """Walk the Prometheus registry, return UDE metrics as structured dicts."""
-    metrics = []
+def _scrape_pushgateway(pipeline_id: Optional[str] = None) -> tuple[list[dict], Optional[str]]:
+    """
+    Fetch Prometheus text from Pushgateway and parse into structured dicts.
+    """
+    url = f"{PUSHGATEWAY_URL}/metrics"
     try:
-        for metric in REGISTRY.collect():
-            if not any(metric.name.startswith(p) for p in _UDE_METRIC_PREFIXES):
-                continue
-            for sample in metric.samples:
-                labels     = sample.labels or {}
-                sample_pid = labels.get("pipeline", labels.get("pipeline_id", ""))
+        req = urllib.request.Request(url, headers={"Accept": "text/plain"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode("utf-8")
+    except Exception as exc:
+        logger.error(f"[Observe] Failed to scrape Pushgateway at {url}: {exc}")
+        return [], f"Cannot reach Pushgateway at {PUSHGATEWAY_URL} — is it running?"
 
-                if pipeline_id and sample_pid and sample_pid != pipeline_id:
-                    continue
+    metrics = []
+    seen    = set()  # deduplicate histogram _sum/_count variants
 
-                extra_labels = {
-                    k: v for k, v in labels.items()
-                    if k not in ("pipeline", "pipeline_id")
-                }
-                labels_str = ", ".join(f'{k}="{v}"' for k, v in extra_labels.items())
+    for line in raw.splitlines():
+        # Skip comments and empty lines
+        if not line or line.startswith("#"):
+            continue
 
-                metrics.append({
-                    "name":     sample.name,
-                    "pipeline": sample_pid or "—",
-                    "value":    sample.value,
-                    "labels":   labels_str,
-                })
-    except Exception as e:
-        logger.error(f"[Observe API] Failed to parse Prometheus registry: {e}")
-    return metrics
+        match = _METRIC_RE.match(line)
+        if not match:
+            continue
+
+        name   = match.group("name")
+        labels = match.group("labels") or ""
+        value  = match.group("value")
+
+        # Only UDE metrics
+        if not any(name.startswith(p) for p in _UDE_PREFIXES):
+            continue
+
+        # Skip histogram internals — only keep _sum for duration metrics
+        if any(name.endswith(s) for s in _SKIP_SUFFIXES):
+            continue
+
+        # Parse labels into a dict
+        label_dict = _parse_labels(labels)
+        pid        = label_dict.pop("pipeline_id", label_dict.pop("pipeline", ""))
+        _          = label_dict.pop("instance", None)   # not useful
+        _          = label_dict.pop("job", None)         # always ude_engine
+
+        # Apply pipeline filter
+        if pipeline_id and pid and pid != pipeline_id:
+            continue
+
+        # Deduplicate — histogram _sum appears once per label combo
+        dedup_key = f"{name}|{pid}|{json.dumps(label_dict, sort_keys=True)}"
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        # Build remaining labels string
+        labels_str = ", ".join(f'{k}="{v}"' for k, v in label_dict.items())
+
+        # Parse numeric value
+        try:
+            numeric = float(value)
+        except ValueError:
+            numeric = 0.0
+
+        # Clean up metric name display — strip _total suffix for counters
+        display_name = name.replace("_total", "")
+
+        metrics.append({
+            "name":     display_name,
+            "pipeline": pid or "—",
+            "value":    numeric,
+            "labels":   labels_str,
+        })
+
+    # Sort by pipeline then metric name
+    metrics.sort(key=lambda m: (m["pipeline"], m["name"]))
+    return metrics, None
+
+
+def _parse_labels(labels_str: str) -> dict:
+    """Parse 'key="val",key2="val2"' into a dict."""
+    result = {}
+    if not labels_str:
+        return result
+    for match in re.finditer(r'(\w+)="([^"]*)"', labels_str):
+        result[match.group(1)] = match.group(2)
+    return result
+
+
+# ── Log buffer + handler ──────────────────────────────────────────────────────
+
+_LEVEL_ORDER = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
 
 
 def _log_generator(
@@ -148,10 +238,8 @@ def _log_generator(
         time.sleep(0.5)
 
 
-# ── In-memory log buffer ──────────────────────────────────────────────────────
-
 class _LogBuffer:
-    """Ring buffer that captures log records from the engine."""
+    """Ring buffer capturing log records from the engine."""
 
     def __init__(self, maxsize: int = 2000) -> None:
         self._entries: list[dict] = []
