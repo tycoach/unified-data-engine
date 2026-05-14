@@ -66,58 +66,39 @@ ui: ## Start Streamlit dashboard only
 
 # ── MiniSky provisioning (runs on every make up) ──────────────────────────────
 
-provision: ## Provision all GCP resources on MiniSky (safe to run multiple times)
+provision: ## Provision all GCP resources on MiniSky
 	@echo "📦 Provisioning MiniSky resources..."
-	@echo "   Waiting for Pub/Sub container to be ready..."
-	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-		result=$$(curl -sf http://localhost:8080/v1/projects/local-dev-project/topics 2>&1); \
-		if echo "$$result" | grep -qE "topics|\{\}"; then \
-			echo "   Pub/Sub ready."; break; \
-		fi; \
-		echo "   Not ready yet (attempt $$i/10) — waiting 3s..."; \
-		sleep 3; \
-	done
-	@echo "   Creating BigQuery datasets..."
 	@curl -sf -X POST http://localhost:8080/bigquery/v2/projects/local-dev-project/datasets \
-			-H "Content-Type: application/json" \
-			-d '{"datasetReference":{"datasetId":"raw_staging","projectId":"local-dev-project"}}' \
-			>/dev/null 2>&1 || true
+		-H "Content-Type: application/json" \
+		-d '{"datasetReference":{"datasetId":"raw_staging","projectId":"local-dev-project"}}' \
+		>/dev/null 2>&1 || true
 	@curl -sf -X POST http://localhost:8080/bigquery/v2/projects/local-dev-project/datasets \
-			-H "Content-Type: application/json" \
-			-d '{"datasetReference":{"datasetId":"snapshots","projectId":"local-dev-project"}}' \
-			>/dev/null 2>&1 || true
+		-H "Content-Type: application/json" \
+		-d '{"datasetReference":{"datasetId":"snapshots","projectId":"local-dev-project"}}' \
+		>/dev/null 2>&1 || true
 	@curl -sf -X POST http://localhost:8080/bigquery/v2/projects/local-dev-project/datasets \
-			-H "Content-Type: application/json" \
-			-d '{"datasetReference":{"datasetId":"marts","projectId":"local-dev-project"}}' \
-			>/dev/null 2>&1 || true
+		-H "Content-Type: application/json" \
+		-d '{"datasetReference":{"datasetId":"marts","projectId":"local-dev-project"}}' \
+		>/dev/null 2>&1 || true
 	@curl -sf -X POST http://localhost:8080/bigquery/v2/projects/local-dev-project/datasets \
-			-H "Content-Type: application/json" \
-			-d '{"datasetReference":{"datasetId":"quarantine","projectId":"local-dev-project"}}' \
-			>/dev/null 2>&1 || true
-	@echo "   Creating Pub/Sub topics..."
+		-H "Content-Type: application/json" \
+		-d '{"datasetReference":{"datasetId":"quarantine","projectId":"local-dev-project"}}' \
+		>/dev/null 2>&1 || true
 	@curl -sf -X PUT http://localhost:8080/v1/projects/local-dev-project/topics/raw.customers \
-			-H "Content-Type: application/json" -d '{}' >/dev/null 2>&1 || true
+		-H "Content-Type: application/json" -d '{}' >/dev/null 2>&1 || true
 	@curl -sf -X PUT http://localhost:8080/v1/projects/local-dev-project/topics/raw.orders \
-			-H "Content-Type: application/json" -d '{}' >/dev/null 2>&1 || true
-	@curl -sf -X PUT http://localhost:8080/v1/projects/local-dev-project/topics/raw.products \
-			-H "Content-Type: application/json" -d '{}' >/dev/null 2>&1 || true
-	@echo "   Creating Pub/Sub subscriptions..."
+		-H "Content-Type: application/json" -d '{}' >/dev/null 2>&1 || true
 	@curl -sf -X PUT \
-			http://localhost:8080/v1/projects/local-dev-project/subscriptions/raw.customers-sub \
-			-H "Content-Type: application/json" \
-			-d '{"topic":"projects/local-dev-project/topics/raw.customers","ackDeadlineSeconds":60}' \
-			>/dev/null 2>&1 || true
+		http://localhost:8080/v1/projects/local-dev-project/subscriptions/raw.customers-sub \
+		-H "Content-Type: application/json" \
+		-d '{"topic":"projects/local-dev-project/topics/raw.customers","ackDeadlineSeconds":60}' \
+		>/dev/null 2>&1 || true
 	@curl -sf -X PUT \
-			http://localhost:8080/v1/projects/local-dev-project/subscriptions/raw.orders-sub \
-			-H "Content-Type: application/json" \
-			-d '{"topic":"projects/local-dev-project/topics/raw.orders","ackDeadlineSeconds":60}' \
-			>/dev/null 2>&1 || true
-	@curl -sf -X PUT \
-			http://localhost:8080/v1/projects/local-dev-project/subscriptions/raw.products-sub \
-			-H "Content-Type: application/json" \
-			-d '{"topic":"projects/local-dev-project/topics/raw.products","ackDeadlineSeconds":60}' \
-			>/dev/null 2>&1 || true
-	@echo "✅ MiniSky resources provisioned (3 topics · 3 subscriptions · 4 datasets)"
+		http://localhost:8080/v1/projects/local-dev-project/subscriptions/raw.orders-sub \
+		-H "Content-Type: application/json" \
+		-d '{"topic":"projects/local-dev-project/topics/raw.orders","ackDeadlineSeconds":60}' \
+		>/dev/null 2>&1 || true
+	@echo "✅ MiniSky resources provisioned"
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
