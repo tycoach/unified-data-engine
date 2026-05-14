@@ -3,7 +3,7 @@ unified_data_engine:
   outputs:
     dev:
       type: duckdb
-      path: dbt/dev.duckdb
+      path: /tmp/unified_data_engine_dev.duckdb
       threads: 4
       schema: main
 
