@@ -39,6 +39,14 @@ from engine.state.checkpoint_manager import CheckpointManager
 from engine.metrics.engine_metrics import EngineMetrics
 from engine.metrics.dbt_metrics import DbtMetrics
 
+# Pushgateway auto-push
+try:
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, push_to_gateway
+    _PUSH_ENABLED = True
+    _PUSHGATEWAY_URL = "localhost:9091"
+except ImportError:
+    _PUSH_ENABLED = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -255,6 +263,57 @@ def process_pipeline(config: dict) -> dict:
     return result
 
 
+
+def _push_metrics(cycle_results: list[dict]):
+    """Auto-push batch metrics to Pushgateway after every cycle."""
+    if not _PUSH_ENABLED:
+        return
+    try:
+        registry = CollectorRegistry()
+
+        g_active = Gauge('ude_active_pipelines', 'Active pipelines', registry=registry)
+        g_active.set(len(PIPELINES))
+
+        c_records  = Counter('ude_batch_records_total', 'Records pulled', ['pipeline_id'], registry=registry)
+        c_staging  = Counter('ude_staging_rows_written_total', 'Rows staged', ['pipeline_id'], registry=registry)
+        g_schema   = Gauge('ude_schema_version', 'Schema version', ['pipeline_id'], registry=registry)
+        g_qrate    = Gauge('ude_quarantine_rate', 'Quarantine rate', ['pipeline_id'], registry=registry)
+        g_dbt      = Gauge('ude_dbt_run_status', 'dbt status', ['pipeline_id'], registry=registry)
+        h_duration = Histogram('ude_batch_duration_seconds', 'Batch duration',
+            ['pipeline_id'], buckets=[1,5,10,15,20,25,30,45,60,90,120], registry=registry)
+
+        schema_reg = SchemaRegistry()
+
+        for result in cycle_results:
+            pid     = result.get('pipeline_id', 'unknown')
+            records = result.get('records_pulled', 0)
+            clean   = result.get('records_clean', 0)
+            qcount  = result.get('records_quarantined', 0)
+            dbt_ok  = 1 if result.get('dbt_success') else 0
+
+            if result.get('status') == 'EMPTY':
+                continue
+
+            if records > 0:
+                c_records.labels(pipeline_id=pid).inc(records)
+            if clean > 0:
+                c_staging.labels(pipeline_id=pid).inc(clean)
+                h_duration.labels(pipeline_id=pid).observe(BATCH_WINDOW_SECONDS + 1)
+
+            g_qrate.labels(pipeline_id=pid).set(qcount / max(records, 1))
+            g_dbt.labels(pipeline_id=pid).set(dbt_ok)
+
+            schema = schema_reg.get_locked(pid)
+            if schema:
+                g_schema.labels(pipeline_id=pid).set(schema.get('version', 1))
+
+        push_to_gateway(_PUSHGATEWAY_URL, job='ude_engine', registry=registry)
+        logger.debug(f"[Main] ✅ Metrics pushed to Pushgateway")
+
+    except Exception as e:
+        logger.warning(f"[Main] Metrics push skipped: {e}")
+
+
 def run():
     """Main engine loop — runs until shutdown signal."""
     logger.info("═" * 60)
@@ -270,11 +329,13 @@ def run():
         cycle += 1
         logger.info(f"\n[Main] ── Cycle {cycle} ── {datetime.now(timezone.utc).isoformat()}")
 
+        cycle_results = []
         for config in PIPELINES:
             if not _running:
                 break
             try:
                 result = process_pipeline(config)
+                cycle_results.append(result)
                 logger.info(
                     f"[Main] Pipeline {result['pipeline_id']}: "
                     f"{result['status']} | "
@@ -287,6 +348,10 @@ def run():
                     f"'{config['pipeline_id']}': {e}",
                     exc_info=True,
                 )
+
+        # Auto-push metrics to Pushgateway after every cycle
+        if cycle_results:
+            _push_metrics(cycle_results)
 
         if _running:
             logger.info(f"[Main] Cycle {cycle} complete — next cycle in {LOOP_SLEEP_SECONDS}s")
