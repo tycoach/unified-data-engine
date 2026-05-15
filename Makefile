@@ -6,7 +6,7 @@
 
 PYTHON   := .venv/bin/python
 PIP      := .venv/bin/pip
-DBT      := .venv/bin/dbt
+DBT      := /home/taiwohassan/unified-data-engine/.venv/bin/dbt
 UVICORN  := .venv/bin/uvicorn
 STREAMLIT := .venv/bin/streamlit
 
