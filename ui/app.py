@@ -41,7 +41,7 @@ st.markdown(theme.GLOBAL_CSS, unsafe_allow_html=True)
 st.sidebar.markdown("""
 <div class="ude-brand">
   <div class="ude-brand-name">
-    <span class="ude-brand-dot"></span>UDE v2
+    <span class="ude-brand-dot"></span>UDE v1
   </div>
   <div class="ude-brand-sub">Unified Data Engine — Operator Dashboard</div>
 </div>
