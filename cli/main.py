@@ -44,7 +44,7 @@ app.add_typer(dbt.app,       name="dbt",       help="dbt commands — run, test,
 app.add_typer(pipeline.app,  name="pipeline",  help="Pipeline management — list, inspect, new, enable, disable")
 app.add_typer(schema.app,    name="schema",    help="Schema operations — sync, history, diff, approve")
 app.add_typer(quarantine.app,name="quarantine",help="Quarantine management — list, inspect, approve, reject, replay")
-app.add_typer(observe.app,   name="observe",   help="Observability — logs, metrics, watch")
+app.add_typer(observe.app,   name="observe",   help="Observability — start, stop, logs, metrics, watch")
 
 
 # ── Global options ────────────────────────────────────────────────────────────

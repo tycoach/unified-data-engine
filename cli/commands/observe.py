@@ -3,6 +3,8 @@
 ude observe — live terminal observability.
 
 Commands:
+    ude observe start    — start Prometheus + Pushgateway + Grafana via Docker
+    ude observe stop     — stop the monitoring stack
     ude observe logs     — stream engine logs to the terminal
     ude observe metrics  — snapshot current Prometheus metrics as a table
     ude observe watch    — live dashboard: batch cycles, test results, record counts
@@ -10,11 +12,13 @@ Commands:
 
 from __future__ import annotations
 
+import subprocess
+import tempfile
 import time
+from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
@@ -23,11 +27,137 @@ from cli.core.checks import assert_stack_running
 from cli.core.context import UDEContext
 from cli.output.console import console, print_error, print_info, print_success, print_warning
 
-app = typer.Typer(help="Observability — logs, metrics, watch")
+app = typer.Typer(help="Observability — start, stop, logs, metrics, watch")
+
+# Minimal docker-compose for the monitoring stack
+# Self-contained — no engine filesystem access required
+_MONITORING_COMPOSE = """\
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ude_prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+      - '--storage.tsdb.retention.time=7d'
+    volumes:
+      - ude_prometheus_data:/prometheus
+    restart: unless-stopped
+
+  pushgateway:
+    image: prom/pushgateway:latest
+    container_name: ude_pushgateway
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ude_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ude_grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  ude_prometheus_data:
+  ude_grafana_data:
+"""
+
+# Store compose file in ~/.ude/ so it persists across sessions
+_COMPOSE_PATH = Path.home() / ".ude" / "monitoring-compose.yml"
 
 
 def _ctx(ctx: typer.Context) -> UDEContext:
     return ctx.obj
+
+
+# ── ude observe start ─────────────────────────────────────────────────────────
+
+@app.command(name="start")
+def start(ctx: typer.Context) -> None:
+    """
+    Start the UDE monitoring stack — Prometheus, Pushgateway, and Grafana.
+
+    Works for 3rd party pip installs — generates a self-contained
+    docker-compose.yml in ~/.ude/ and starts it with Docker.
+    No access to the engine filesystem required.
+    """
+    # Check Docker is available
+    result = subprocess.run(
+        ["docker", "info"],
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        print_error("Docker is not running. Start Docker Desktop and try again.")
+        raise typer.Exit(code=1)
+
+    # Write compose file to ~/.ude/
+    _COMPOSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _COMPOSE_PATH.write_text(_MONITORING_COMPOSE)
+
+    print_info("Starting monitoring stack (Prometheus + Pushgateway + Grafana)...")
+
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(_COMPOSE_PATH), "up", "-d"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print_error("Failed to start monitoring stack.")
+        console.print(result.stderr)
+        raise typer.Exit(code=1)
+
+    # Wait for services to be ready
+    print_info("Waiting for services to be ready...")
+    time.sleep(4)
+
+    print_success("Monitoring stack is running.")
+    console.print()
+    console.print("    [bold]Prometheus[/bold]  → http://localhost:9090")
+    console.print("    [bold]Pushgateway[/bold] → http://localhost:9091")
+    console.print("    [bold]Grafana[/bold]     → http://localhost:3000  [muted](admin / admin)[/muted]")
+    console.print()
+    print_info("Compose file saved to: ~/.ude/monitoring-compose.yml")
+    print_info("Stop with: ude observe stop")
+
+
+# ── ude observe stop ──────────────────────────────────────────────────────────
+
+@app.command(name="stop")
+def stop(ctx: typer.Context) -> None:
+    """Stop the UDE monitoring stack."""
+    if not _COMPOSE_PATH.exists():
+        print_warning("No monitoring stack compose file found at ~/.ude/monitoring-compose.yml")
+        print_info("Start it first with: ude observe start")
+        raise typer.Exit()
+
+    print_info("Stopping monitoring stack...")
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(_COMPOSE_PATH), "down"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print_error("Failed to stop monitoring stack.")
+        console.print(result.stderr)
+        raise typer.Exit(code=1)
+
+    print_success("Monitoring stack stopped.")
 
 
 # ── ude observe logs ──────────────────────────────────────────────────────────
@@ -42,7 +172,6 @@ def logs(
     level: str = typer.Option(
         "INFO", "--level", "-l",
         help="Minimum log level to show",
-        show_choices=True,
     ),
     follow: bool = typer.Option(
         True, "--follow/--no-follow", "-f",
@@ -53,12 +182,7 @@ def logs(
         help="Number of historical lines to show before streaming"
     ),
 ) -> None:
-    """
-    Stream engine logs to the terminal.
-
-    Log lines are colour-coded by level:
-      INFO → cyan · WARNING → yellow · ERROR → red · DEBUG → dim
-    """
+    """Stream engine logs to the terminal."""
     ude_ctx = _ctx(ctx)
     assert_stack_running(ude_ctx.config)
 
@@ -66,11 +190,11 @@ def logs(
     client = ObserveClient(ude_ctx.config)
 
     level_style = {
-        "DEBUG":   "dim",
-        "INFO":    "cyan",
-        "WARNING": "yellow",
-        "ERROR":   "bold red",
-        "CRITICAL":"bold red on white",
+        "DEBUG":    "dim",
+        "INFO":     "cyan",
+        "WARNING":  "yellow",
+        "ERROR":    "bold red",
+        "CRITICAL": "bold red on white",
     }
 
     print_info(
@@ -94,7 +218,7 @@ def logs(
             message   = entry.get("message", "")
             style     = level_style.get(log_level, "white")
 
-            pid_tag = f"[pipeline] {pid}[/pipeline]" if pid else ""
+            pid_tag = f" [pipeline]{pid}[/pipeline]" if pid else ""
             console.print(
                 f"[muted]{ts}[/muted] [{style}]{log_level:8}[/{style}]"
                 f"{pid_tag} {message}"
@@ -126,13 +250,23 @@ def metrics(
     client = ObserveClient(ude_ctx.config)
 
     def _render(data: dict) -> Panel:
-        table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
-        table.add_column("Metric",    style="muted",    min_width=40)
-        table.add_column("Pipeline",  style="pipeline", min_width=14)
-        table.add_column("Value",     justify="right")
-        table.add_column("Labels",    style="dim")
+        table = Table(
+            show_header=True, header_style="bold",
+            box=None, padding=(0, 2)
+        )
+        table.add_column("Metric",   style="muted",    min_width=40)
+        table.add_column("Pipeline", style="pipeline", min_width=14)
+        table.add_column("Value",    justify="right",  min_width=8)
+        table.add_column("Labels",   style="dim")
 
-        for m in data.get("metrics", []):
+        metrics_list = data.get("metrics", [])
+        if not metrics_list:
+            table.add_row(
+                "[muted]No metrics yet — run make seed to generate data[/muted]",
+                "", "", ""
+            )
+
+        for m in metrics_list:
             table.add_row(
                 m.get("name", "—"),
                 m.get("pipeline", "—"),
@@ -140,14 +274,15 @@ def metrics(
                 m.get("labels", ""),
             )
 
-        return Panel(
-            table,
-            title="[bold]UDE Metrics[/bold]"
-            + (f" · [pipeline]{pipeline_id}[/pipeline]" if pipeline_id else "")
-            + f" [muted]{data.get('scraped_at', '')}[/muted]",
-            border_style="cyan",
-            padding=(1, 2),
-        )
+        source = data.get("source", "pushgateway")
+        error  = data.get("error")
+        title  = f"[bold]UDE Metrics[/bold]" \
+                 + (f" · [pipeline]{pipeline_id}[/pipeline]" if pipeline_id else "") \
+                 + f" [muted]{data.get('scraped_at', '')}[/muted]"
+        if error:
+            title += f" [error]⚠ {error}[/error]"
+
+        return Panel(table, title=title, border_style="cyan", padding=(1, 2))
 
     if not watch:
         data = client.get_metrics(pipeline_id=pipeline_id)
@@ -156,7 +291,6 @@ def metrics(
         console.print()
         return
 
-    # Watch mode — refresh every 5 seconds
     print_info("Refreshing every 5s · Ctrl+C to stop")
     try:
         with Live(console=console, refresh_per_second=0.2, screen=False) as live:
@@ -183,16 +317,14 @@ def watch(
     ),
 ) -> None:
     """
-    Live batch feed — shows each cycle's record counts, dbt test results,
-    schema status, and quarantine rate as they happen.
-
-    This is the terminal equivalent of the Streamlit operator dashboard.
+    Live batch feed — records, dbt results, schema status, quarantine rate.
     Press Ctrl+C to exit.
     """
     ude_ctx = _ctx(ctx)
     assert_stack_running(ude_ctx.config)
 
     from cli.client.observe import ObserveClient
+    from cli.output.live import build_watch_layout
     client = ObserveClient(ude_ctx.config)
 
     print_info(
@@ -204,102 +336,27 @@ def watch(
 
     batch_history: list[dict] = []
 
-    def _build_display() -> Layout:
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header",  size=3),
-            Layout(name="batches", minimum_size=8),
-            Layout(name="footer",  size=3),
-        )
-
-        # Header
-        layout["header"].update(Panel(
-            f"[bold]UDE Watch[/bold]  "
-            + (f"[pipeline]{pipeline_id}[/pipeline]" if pipeline_id else "[muted]all pipelines[/muted]")
-            + f"  [muted]updated {time.strftime('%H:%M:%S')}[/muted]",
-            border_style="cyan",
-        ))
-
-        # Batch history table
-        table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
-        table.add_column("Time",          style="muted", min_width=10)
-        table.add_column("Pipeline",      style="pipeline")
-        table.add_column("Records",       justify="right")
-        table.add_column("Quarantined",   justify="right")
-        table.add_column("dbt",           justify="center")
-        table.add_column("Snaps opened",  justify="right")
-        table.add_column("Schema")
-        table.add_column("Duration",      justify="right", style="muted")
-
-        for b in batch_history[-20:]:  # show last 20 batches
-            dbt_status = (
-                "[success]✓[/success]" if b.get("dbt_passed")
-                else "[error]✗[/error]"
-            )
-            schema_status = {
-                "MATCH":   "[success]MATCH[/success]",
-                "EVOLVED": "[warning]EVOLVED[/warning]",
-                "BROKEN":  "[error]BROKEN[/error]",
-            }.get(b.get("schema_status", "MATCH"), "—")
-
-            qrate = b.get("quarantine_rate", 0)
-            q_str = (
-                f"[error]{qrate:.1%}[/error]" if qrate > 0.1
-                else f"[warning]{qrate:.1%}[/warning]" if qrate > 0
-                else "[success]0%[/success]"
-            )
-
-            table.add_row(
-                b.get("batch_time", "—"),
-                b.get("pipeline_id", "—"),
-                str(b.get("records_clean", "—")),
-                q_str,
-                dbt_status,
-                str(b.get("snapshot_opened", "—")),
-                schema_status,
-                f"{b.get('duration_ms', 0):,}ms",
-            )
-
-        layout["batches"].update(Panel(
-            table,
-            title="[bold]Batch cycles[/bold]",
-            border_style="dim",
-            padding=(0, 1),
-        ))
-
-        # Footer — summary stats
-        total_records = sum(b.get("records_clean", 0) for b in batch_history)
-        total_quarantined = sum(b.get("records_quarantined", 0) for b in batch_history)
-        dbt_failures = sum(1 for b in batch_history if not b.get("dbt_passed", True))
-
-        footer_grid = Table.grid(padding=(0, 4))
-        footer_grid.add_column()
-        footer_grid.add_column()
-        footer_grid.add_column()
-        footer_grid.add_row(
-            f"[muted]Total records:[/muted] [bold]{total_records:,}[/bold]",
-            f"[muted]Quarantined:[/muted] [bold]{total_quarantined:,}[/bold]",
-            f"[muted]dbt failures:[/muted] "
-            + (f"[error]{dbt_failures}[/error]" if dbt_failures else "[success]0[/success]"),
-        )
-        layout["footer"].update(Panel(footer_grid, border_style="dim"))
-
-        return layout
-
     try:
-        with Live(console=console, refresh_per_second=1, screen=True) as live:
+        with Live(
+            console=console,
+            refresh_per_second=1,
+            screen=True,
+        ) as live:
             while True:
                 new_batches = client.get_recent_batches(
                     pipeline_id=pipeline_id,
                     limit=5,
                 )
-                # Merge new batches into history (dedupe by batch_id)
                 existing_ids = {b.get("batch_id") for b in batch_history}
                 for b in new_batches:
                     if b.get("batch_id") not in existing_ids:
                         batch_history.append(b)
 
-                live.update(_build_display())
+                live.update(build_watch_layout(
+                    batch_history=batch_history,
+                    pipeline_id=pipeline_id,
+                    interval=interval,
+                ))
                 time.sleep(interval)
 
     except KeyboardInterrupt:

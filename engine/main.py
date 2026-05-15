@@ -17,6 +17,10 @@
 #   BROKEN schema    → quarantine batch, nack, alert
 #   Edge case > 10%  → quarantine dirty, continue with clean
 #   dbt test fail    → nack, no checkpoint, reprocess next cycle
+#
+# Hot-reload: PIPELINES is reloaded at the top of every cycle.
+# API-registered pipelines (via POST /pipeline/) are picked up
+# without an engine restart.
 
 import time
 import logging
@@ -53,16 +57,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Pipeline configurations — loaded from config/pipelines/*.yml ──────────────
+# ── Engine config (loaded once at startup) ────────────────────────────────────
 from config.loader import load_pipelines, load_engine_config
 
-_engine_config = load_engine_config()
+_engine_config   = load_engine_config()
 _engine_settings = _engine_config.get("engine", {})
 
-PIPELINES = load_pipelines()
-PROJECT_ID = _engine_settings.get("project_id", "local-dev-project")
+PROJECT_ID           = _engine_settings.get("project_id", "local-dev-project")
 BATCH_WINDOW_SECONDS = _engine_settings.get("batch_window_seconds", 30)
-LOOP_SLEEP_SECONDS = _engine_settings.get("loop_sleep_seconds", 1)
+LOOP_SLEEP_SECONDS   = _engine_settings.get("loop_sleep_seconds", 1)
+
+# NOTE: PIPELINES is NOT loaded here at module level.
+# It is reloaded at the top of every cycle in run() so that
+# pipelines registered via POST /pipeline/ are picked up
+# without an engine restart. See run() below.
 
 # Graceful shutdown flag
 _running = True
@@ -83,19 +91,19 @@ def process_pipeline(config: dict) -> dict:
     Run one complete micro-batch lifecycle for a single pipeline.
     Returns result dict with status and metrics.
     """
-    pipeline_id = config["pipeline_id"]
+    pipeline_id     = config["pipeline_id"]
     subscription_id = config["subscription_id"]
-    scd_type = config["scd_type"]
+    scd_type        = config["scd_type"]
 
     batch_start = time.time()
     result = {
-        "pipeline_id": pipeline_id,
-        "batch_id": None,
-        "status": "UNKNOWN",
-        "records_pulled": 0,
-        "records_clean": 0,
+        "pipeline_id":        pipeline_id,
+        "batch_id":           None,
+        "status":             "UNKNOWN",
+        "records_pulled":     0,
+        "records_clean":      0,
         "records_quarantined": 0,
-        "dbt_success": False,
+        "dbt_success":        False,
     }
 
     # ── Initialize components ─────────────────────────────────────────────────
@@ -104,19 +112,19 @@ def process_pipeline(config: dict) -> dict:
         subscription_id=subscription_id,
         batch_window_seconds=BATCH_WINDOW_SECONDS,
     )
-    offset_mgr = OffsetManager(pipeline_id)
-    registry = SchemaRegistry()
+    offset_mgr     = OffsetManager(pipeline_id)
+    registry       = SchemaRegistry()
     checkpoint_mgr = CheckpointManager(pipeline_id)
-    dbt_runner = DbtRunner(target="dev")
+    dbt_runner     = DbtRunner(target="dev")
 
     # Open batch
-    batch_id = offset_mgr.open_batch()
+    batch_id           = offset_mgr.open_batch()
     result["batch_id"] = batch_id
     logger.info(f"[Main] ═══ Pipeline: {pipeline_id} | Batch: {batch_id} ═══")
 
-    # ──  Pull messages ─────────────────────────────────────────────────
-    messages, ack_ids = consumer.pull_batch()
-    result["records_pulled"] = len(messages)
+    # ── Pull messages ─────────────────────────────────────────────────────────
+    messages, ack_ids         = consumer.pull_batch()
+    result["records_pulled"]  = len(messages)
 
     if not messages:
         logger.info(f"[Main] No messages for {pipeline_id} — skipping batch")
@@ -125,9 +133,9 @@ def process_pipeline(config: dict) -> dict:
 
     EngineMetrics.record_batch_pulled(pipeline_id, len(messages), subscription_id)
 
-    # ── Schema check ──────────────────────────────────────────────────
+    # ── Schema check ──────────────────────────────────────────────────────────
     incoming_schema = infer_schema(messages, pipeline_id)
-    locked_schema = registry.get_locked(pipeline_id)
+    locked_schema   = registry.get_locked(pipeline_id)
 
     if not locked_schema:
         # First batch — lock schema and generate dbt contract
@@ -170,8 +178,8 @@ def process_pipeline(config: dict) -> dict:
             write_contract(locked_schema)
             EngineMetrics.record_schema_version(pipeline_id, locked_schema["version"])
 
-    # ──  Edge case gate ────────────────────────────────────────────────
-    handler = EdgeCaseHandler(config)
+    # ── Edge case gate ────────────────────────────────────────────────────────
+    handler     = EdgeCaseHandler(config)
     gate_result = handler.run(messages, batch_id, locked_schema)
 
     EngineMetrics.record_edge_case_result(
@@ -183,7 +191,7 @@ def process_pipeline(config: dict) -> dict:
         quarantine_rate=gate_result.quarantine_count / max(len(messages), 1),
     )
 
-    result["records_clean"] = gate_result.clean_count
+    result["records_clean"]      = gate_result.clean_count
     result["records_quarantined"] = gate_result.quarantine_count
 
     # Write dirty records to quarantine
@@ -198,17 +206,17 @@ def process_pipeline(config: dict) -> dict:
         result["status"] = "ALL_QUARANTINED"
         return result
 
-    # ──  Write to BigQuery staging ─────────────────────────────────────
-    staging_start = time.time()
-    writer = StagingWriter(pipeline_id)
-    rows_written = writer.write(gate_result.clean_records, batch_id, locked_schema)
+    # ── Write to BigQuery staging ─────────────────────────────────────────────
+    staging_start    = time.time()
+    writer           = StagingWriter(pipeline_id)
+    rows_written     = writer.write(gate_result.clean_records, batch_id, locked_schema)
     staging_duration = time.time() - staging_start
 
     EngineMetrics.record_staging_write(pipeline_id, rows_written, staging_duration)
     logger.info(f"[Main] Staged {rows_written} rows in {staging_duration:.2f}s")
 
-    # ──  Trigger dbt ───────────────────────────────────────────────────
-    dbt_start = time.time()
+    # ── Trigger dbt ───────────────────────────────────────────────────────────
+    dbt_start  = time.time()
     dbt_result = dbt_runner.run_full_pipeline(
         pipeline_id=pipeline_id,
         batch_id=batch_id,
@@ -232,7 +240,7 @@ def process_pipeline(config: dict) -> dict:
         result["status"] = "DBT_FAILED"
         return result
 
-    # ──  Checkpoint + ack ──────────────────────────────────────────────
+    # ── Checkpoint + ack ──────────────────────────────────────────────────────
     checkpoint_ok = checkpoint_mgr.write(
         batch_id=batch_id,
         records_processed=rows_written,
@@ -255,7 +263,7 @@ def process_pipeline(config: dict) -> dict:
     EngineMetrics.record_batch_duration(pipeline_id, batch_duration)
 
     logger.info(
-        f"[Main] ----Batch {batch_id} {result['status']} | "
+        f"[Main] ---- Batch {batch_id} {result['status']} | "
         f"clean={rows_written} quarantined={gate_result.quarantine_count} "
         f"duration={batch_duration:.2f}s"
     )
@@ -263,24 +271,28 @@ def process_pipeline(config: dict) -> dict:
     return result
 
 
-
-def _push_metrics(cycle_results: list[dict]):
+def _push_metrics(cycle_results: list[dict], active_pipeline_count: int):
     """Auto-push batch metrics to Pushgateway after every cycle."""
     if not _PUSH_ENABLED:
         return
     try:
         registry = CollectorRegistry()
 
-        g_active = Gauge('ude_active_pipelines', 'Active pipelines', registry=registry)
-        g_active.set(len(PIPELINES))
-
+        g_active   = Gauge('ude_active_pipelines', 'Active pipelines', registry=registry)
         c_records  = Counter('ude_batch_records_total', 'Records pulled', ['pipeline_id'], registry=registry)
         c_staging  = Counter('ude_staging_rows_written_total', 'Rows staged', ['pipeline_id'], registry=registry)
         g_schema   = Gauge('ude_schema_version', 'Schema version', ['pipeline_id'], registry=registry)
         g_qrate    = Gauge('ude_quarantine_rate', 'Quarantine rate', ['pipeline_id'], registry=registry)
         g_dbt      = Gauge('ude_dbt_run_status', 'dbt status', ['pipeline_id'], registry=registry)
-        h_duration = Histogram('ude_batch_duration_seconds', 'Batch duration',
-            ['pipeline_id'], buckets=[1,5,10,15,20,25,30,45,60,90,120], registry=registry)
+        h_duration = Histogram(
+            'ude_batch_duration_seconds', 'Batch duration',
+            ['pipeline_id'],
+            buckets=[1, 5, 10, 15, 20, 25, 30, 45, 60, 90, 120],
+            registry=registry,
+        )
+
+        # Use live pipeline count passed from the cycle
+        g_active.set(active_pipeline_count)
 
         schema_reg = SchemaRegistry()
 
@@ -308,29 +320,49 @@ def _push_metrics(cycle_results: list[dict]):
                 g_schema.labels(pipeline_id=pid).set(schema.get('version', 1))
 
         push_to_gateway(_PUSHGATEWAY_URL, job='ude_engine', registry=registry)
-        logger.debug(f"[Main] ✅ Metrics pushed to Pushgateway")
+        logger.debug("[Main] ✅ Metrics pushed to Pushgateway")
 
     except Exception as e:
         logger.warning(f"[Main] Metrics push skipped: {e}")
 
 
 def run():
-    """Main engine loop — runs until shutdown signal."""
+    """
+    Main engine loop — runs until shutdown signal.
+
+    PIPELINES is reloaded at the top of every cycle so that pipelines
+    registered via POST /pipeline/ are picked up without a restart.
+    """
     logger.info("═" * 60)
     logger.info("  Unified Data Engine v2 — starting")
-    logger.info(f"  Pipelines: {[p['pipeline_id'] for p in PIPELINES]}")
+    logger.info("  Pipelines: loaded dynamically per cycle (hot-reload enabled)")
     logger.info(f"  Batch window: {BATCH_WINDOW_SECONDS}s")
     logger.info("═" * 60)
 
-    EngineMetrics.set_active_pipelines(len(PIPELINES))
     cycle = 0
 
     while _running:
         cycle += 1
-        logger.info(f"\n[Main] ── Cycle {cycle} ── {datetime.now(timezone.utc).isoformat()}")
+        logger.info(
+            f"\n[Main] ── Cycle {cycle} ── {datetime.now(timezone.utc).isoformat()}"
+        )
+
+        # ── Hot-reload pipelines every cycle ─────────────────────────────────
+        # Picks up pipelines registered via POST /pipeline/ without restart.
+        # Also picks up new filesystem YAML files dropped into config/pipelines/.
+        pipelines = load_pipelines()
+
+        if cycle == 1 or cycle % 10 == 0:
+            # Log pipeline list on first cycle and every 10 cycles
+            logger.info(
+                f"[Main] Active pipelines ({len(pipelines)}): "
+                f"{[p['pipeline_id'] for p in pipelines]}"
+            )
+
+        EngineMetrics.set_active_pipelines(len(pipelines))
 
         cycle_results = []
-        for config in PIPELINES:
+        for config in pipelines:
             if not _running:
                 break
             try:
@@ -351,10 +383,12 @@ def run():
 
         # Auto-push metrics to Pushgateway after every cycle
         if cycle_results:
-            _push_metrics(cycle_results)
+            _push_metrics(cycle_results, active_pipeline_count=len(pipelines))
 
         if _running:
-            logger.info(f"[Main] Cycle {cycle} complete — next cycle in {LOOP_SLEEP_SECONDS}s")
+            logger.info(
+                f"[Main] Cycle {cycle} complete — next cycle in {LOOP_SLEEP_SECONDS}s"
+            )
             time.sleep(LOOP_SLEEP_SECONDS)
 
     logger.info("[Main] Engine stopped cleanly.")
