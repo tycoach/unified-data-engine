@@ -1,9 +1,10 @@
+# cli/core/config.py
 """
 Config resolution for the ude CLI.
 
 Priority order (highest to lowest):
   1. --host / --port flags passed at command level
-  2. UDE_HOST / UDE_PORT environment variables
+  2. UDE_HOST / UDE_PORT / UDE_PROJECT_TOKEN environment variables
   3. ~/.ude/config.yml
   4. Hardcoded defaults (localhost:8000)
 """
@@ -11,27 +12,34 @@ Priority order (highest to lowest):
 from __future__ import annotations
 
 import os
+import secrets
+import string
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-CONFIG_DIR = Path.home() / ".ude"
+CONFIG_DIR  = Path.home() / ".ude"
 CONFIG_FILE = CONFIG_DIR / "config.yml"
 
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8000
-DEFAULT_ENV = "local"
+DEFAULT_ENV  = "local"
+
+# Engine owner token — sees everything including filesystem pipelines
+ENGINE_OWNER_TOKEN = "__engine__"
 
 
 @dataclass
 class UDEConfig:
-    host: str = DEFAULT_HOST
-    port: int = DEFAULT_PORT
-    env: str = DEFAULT_ENV          # local | staging | production
-    minisky_url: str = "http://localhost:9099"
-    timeout: int = 30               # seconds for HTTP requests
-    extra: dict = field(default_factory=dict)
+    host:          str  = DEFAULT_HOST
+    port:          int  = DEFAULT_PORT
+    env:           str  = DEFAULT_ENV
+    minisky_url:   str  = "http://localhost:9099"
+    timeout:       int  = 30
+    project_token: str  = ""        # scopes API calls to this project
+    project_name:  str  = ""        # human-readable project name
+    extra:         dict = field(default_factory=dict)
 
     @property
     def api_base_url(self) -> str:
@@ -41,15 +49,22 @@ class UDEConfig:
     def is_local(self) -> bool:
         return self.env == "local"
 
+    @property
+    def has_project(self) -> bool:
+        """True if a project token is configured."""
+        return bool(self.project_token)
+
+    @property
+    def is_engine_owner(self) -> bool:
+        """True if using the engine owner token (sees all pipelines)."""
+        return self.project_token == ENGINE_OWNER_TOKEN
+
 
 def load_config(
     host: str | None = None,
     port: int | None = None,
 ) -> UDEConfig:
-    """
-    Load config with full priority chain.
-    Explicit args > env vars > config file > defaults.
-    """
+    """Load config with full priority chain."""
     file_cfg = _load_file()
 
     resolved_host = (
@@ -74,6 +89,11 @@ def load_config(
         os.getenv("UDE_TIMEOUT", "")
         or file_cfg.get("timeout", 30)
     )
+    resolved_token = (
+        os.getenv("UDE_PROJECT_TOKEN")
+        or file_cfg.get("project_token", "")
+    )
+    resolved_name = file_cfg.get("project_name", "")
 
     return UDEConfig(
         host=resolved_host,
@@ -81,12 +101,36 @@ def load_config(
         env=resolved_env,
         minisky_url=resolved_minisky,
         timeout=resolved_timeout,
+        project_token=resolved_token,
+        project_name=resolved_name,
         extra=file_cfg,
     )
 
 
+def generate_token(project_name: str) -> str:
+    """
+    Generate a project-scoped token.
+
+    Format: proj_{slug}-{6 random chars}
+    Example: proj_acme-analytics-a3f9b2
+    """
+    # Slugify the project name
+    slug = (
+        project_name.lower()
+        .replace(" ", "-")
+        .replace("_", "-")
+    )
+    # Keep only alphanumeric and hyphens, max 20 chars
+    slug = "".join(c for c in slug if c.isalnum() or c == "-")[:20].strip("-")
+
+    # 6 random hex chars
+    suffix = secrets.token_hex(3)
+
+    return f"proj_{slug}-{suffix}"
+
+
 def _load_file() -> dict:
-    """Read ~/.ude/config.yml if it exists. Return empty dict if not."""
+    """Read ~/.ude/config.yml if it exists."""
     if not CONFIG_FILE.exists():
         return {}
     try:
@@ -101,7 +145,7 @@ def write_config(cfg: dict) -> None:
     """Write (or overwrite) ~/.ude/config.yml."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with CONFIG_FILE.open("w") as f:
-        yaml.dump(cfg, f, default_flow_style=False)
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
 
 def config_exists() -> bool:

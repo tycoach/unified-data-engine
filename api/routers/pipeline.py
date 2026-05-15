@@ -1,12 +1,16 @@
 # api/routers/pipeline.py
 """
-Pipeline management endpoints.
+Pipeline management endpoints — project-scoped.
 
-GET    /pipeline/                  — list all pipelines
+All endpoints read X-UDE-Project header to scope operations.
+Filesystem pipelines are never returned to external (tokened) callers.
+Engine owner (no token or __engine__ token) sees everything.
+
+GET    /pipeline/                  — list pipelines (scoped to caller's project)
 GET    /pipeline/batches           — recent batch cycle summaries
 GET    /pipeline/{id}              — full pipeline detail
 GET    /pipeline/{id}/status       — quick status check
-POST   /pipeline/                  — register a new pipeline (API store + filesystem)
+POST   /pipeline/                  — register a new pipeline (project-scoped)
 DELETE /pipeline/{id}              — deregister a pipeline
 PATCH  /pipeline/{id}/enable       — resume a paused pipeline
 PATCH  /pipeline/{id}/disable      — pause a pipeline
@@ -17,7 +21,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from pydantic import BaseModel, field_validator
 
 from config.loader import (
@@ -25,6 +29,7 @@ from config.loader import (
     register_pipeline,
     deregister_pipeline,
     get_pipeline,
+    ENGINE_OWNER_TOKEN,
 )
 from engine.state.bigtable_client import BigtableClient
 from engine.state.checkpoint_manager import CheckpointManager
@@ -37,11 +42,10 @@ logger = logging.getLogger(__name__)
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class PipelineRegisterRequest(BaseModel):
-    """Payload for POST /pipeline/ — register a new pipeline."""
     pipeline_id:          str
     subscription_id:      str
     natural_key:          str
-    scd_type:             int   # 1 or 2
+    scd_type:             int
     edge_case_mode:       str   = "quarantine"
     null_threshold:       float = 0.05
     late_arrival_window:  str   = "24h"
@@ -67,16 +71,17 @@ class PipelineRegisterRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _all_pipeline_ids() -> list[str]:
-    return [p["pipeline_id"] for p in load_pipelines()]
+def _token(x_ude_project: Optional[str]) -> str:
+    """Normalise the project token from the header."""
+    return (x_ude_project or "").strip()
 
 
-def _pipeline_config(pipeline_id: str) -> dict:
-    return get_pipeline(pipeline_id) or {}
+def _all_pipeline_ids(token: str) -> list[str]:
+    return [p["pipeline_id"] for p in load_pipelines(project_token=token)]
 
 
-def _assert_exists(pipeline_id: str) -> None:
-    if pipeline_id not in _all_pipeline_ids():
+def _assert_exists(pipeline_id: str, token: str) -> None:
+    if pipeline_id not in _all_pipeline_ids(token):
         raise HTTPException(
             status_code=404,
             detail=f"Pipeline '{pipeline_id}' not found",
@@ -99,48 +104,52 @@ def _set_enabled(pipeline_id: str, enabled: bool) -> None:
 # ── POST /pipeline/ ───────────────────────────────────────────────────────────
 
 @router.post("/", status_code=201)
-def create_pipeline(request: PipelineRegisterRequest):
+def create_pipeline(
+    request: PipelineRegisterRequest,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
     """
-    Register a new pipeline with the engine.
+    Register a new pipeline, scoped to the caller's project token.
 
-    Persists to Bigtable (primary store) and config/pipelines/ (write-through).
-    The engine picks up new pipelines on its next cycle — no restart needed.
-
-    This is the endpoint ude pipeline new calls after scaffolding local files.
-    3rd party users who install via pip never need filesystem access.
+    3rd party users never touch the engine filesystem — their pipelines
+    are stored in Bigtable under pipeline_config#{token}#{id}.
+    The engine picks them up on its next cycle.
     """
+    token       = _token(x_ude_project)
     pipeline_id = request.pipeline_id
 
-    # Check for duplicate
-    existing = get_pipeline(pipeline_id)
+    existing = get_pipeline(pipeline_id, project_token=token)
     if existing:
         raise HTTPException(
             status_code=409,
-            detail=f"Pipeline '{pipeline_id}' already exists. "
-                   f"Use PATCH /pipeline/{pipeline_id} to update it.",
+            detail=f"Pipeline '{pipeline_id}' already exists in your project.",
         )
 
     config = request.model_dump()
-    config["registered_at"] = datetime.now(timezone.utc).isoformat()
+    config["registered_at"]  = datetime.now(timezone.utc).isoformat()
     config["registered_via"] = "api"
+    if token:
+        config["project_token"] = token
 
-    ok = register_pipeline(config)
+    ok = register_pipeline(config, project_token=token)
     if not ok:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to persist pipeline '{pipeline_id}' — check engine state store",
+            detail=f"Failed to persist pipeline '{pipeline_id}'",
         )
 
-    logger.info(f"[Pipeline API] Registered new pipeline: '{pipeline_id}'")
+    logger.info(f"[Pipeline API] Registered '{pipeline_id}' "
+                f"(token={token[:12] if token else 'none'})")
 
     return {
         "pipeline_id":    pipeline_id,
         "status":         "registered",
         "registered_at":  config["registered_at"],
         "registered_via": "api",
-        "message":        (
+        "scoped_to":      token or "engine-owner",
+        "message": (
             f"Pipeline '{pipeline_id}' registered. "
-            f"The engine will pick it up on its next cycle."
+            "The engine picks it up on its next cycle."
         ),
     }
 
@@ -148,18 +157,23 @@ def create_pipeline(request: PipelineRegisterRequest):
 # ── GET /pipeline/ ────────────────────────────────────────────────────────────
 
 @router.get("/")
-def list_pipelines():
+def list_pipelines(
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
     """
-    List all pipelines — filesystem + API-registered combined.
-    Returns fields the CLI client expects.
+    List pipelines scoped to the caller's project token.
+
+    External callers (with token) only see their own pipelines.
+    Engine owner (no token) sees all pipelines including filesystem ones.
     """
-    pipeline_ids = _all_pipeline_ids()
+    token        = _token(x_ude_project)
+    pipeline_ids = _all_pipeline_ids(token)
     registry     = SchemaRegistry()
     client       = BigtableClient()
     result       = []
 
     for pid in pipeline_ids:
-        cfg        = _pipeline_config(pid)
+        cfg        = get_pipeline(pid, project_token=token) or {}
         schema     = registry.get_locked(pid)
         last_batch = client.get_last_committed_batch(pid)
         checkpoint = None
@@ -186,13 +200,16 @@ def list_pipelines():
 
 @router.get("/batches")
 def list_batches(
-    pipeline_id: Optional[str] = Query(None),
-    limit:       int           = Query(20),
+    pipeline_id:   Optional[str] = Query(None),
+    limit:         int           = Query(20),
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
 ):
-    """Recent batch cycle summaries for ude observe watch."""
-    pipeline_ids = _all_pipeline_ids()
+    """Recent batch cycle summaries — scoped to caller's project."""
+    token        = _token(x_ude_project)
+    pipeline_ids = _all_pipeline_ids(token)
+
     if pipeline_id:
-        _assert_exists(pipeline_id)
+        _assert_exists(pipeline_id, token)
         pipeline_ids = [pipeline_id]
 
     batches = []
@@ -235,11 +252,15 @@ def list_batches(
 # ── GET /pipeline/{pipeline_id} ───────────────────────────────────────────────
 
 @router.get("/{pipeline_id}")
-def get_pipeline_detail(pipeline_id: str):
-    """Full pipeline detail — config + schema fields + last batch."""
-    _assert_exists(pipeline_id)
+def get_pipeline_detail(
+    pipeline_id:   str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    """Full pipeline detail — scoped to caller's project."""
+    token = _token(x_ude_project)
+    _assert_exists(pipeline_id, token)
 
-    cfg      = _pipeline_config(pipeline_id)
+    cfg      = get_pipeline(pipeline_id, project_token=token) or {}
     registry = SchemaRegistry()
     manager  = CheckpointManager(pipeline_id)
     schema   = registry.get_locked(pipeline_id)
@@ -283,19 +304,18 @@ def get_pipeline_detail(pipeline_id: str):
 # ── GET /pipeline/{pipeline_id}/status ────────────────────────────────────────
 
 @router.get("/{pipeline_id}/status")
-def pipeline_status(pipeline_id: str):
-    """Quick status check."""
-    _assert_exists(pipeline_id)
+def pipeline_status(
+    pipeline_id:   str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    token = _token(x_ude_project)
+    _assert_exists(pipeline_id, token)
 
     manager = CheckpointManager(pipeline_id)
     last    = manager.get_last_checkpoint()
 
     if not last:
-        return {
-            "pipeline_id": pipeline_id,
-            "status":      "NEVER_RUN",
-            "enabled":     _is_enabled(pipeline_id),
-        }
+        return {"pipeline_id": pipeline_id, "status": "NEVER_RUN", "enabled": _is_enabled(pipeline_id)}
 
     return {
         "pipeline_id":         pipeline_id,
@@ -311,29 +331,29 @@ def pipeline_status(pipeline_id: str):
 # ── PATCH /pipeline/{pipeline_id}/enable ──────────────────────────────────────
 
 @router.patch("/{pipeline_id}/enable")
-def enable_pipeline(pipeline_id: str):
-    """Resume a paused pipeline."""
-    _assert_exists(pipeline_id)
+def enable_pipeline(
+    pipeline_id:   str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    token = _token(x_ude_project)
+    _assert_exists(pipeline_id, token)
     _set_enabled(pipeline_id, True)
-    logger.info(f"[Pipeline API] '{pipeline_id}' enabled")
-    return {
-        "pipeline_id": pipeline_id,
-        "enabled":     True,
-        "updated_at":  datetime.now(timezone.utc).isoformat(),
-    }
+    return {"pipeline_id": pipeline_id, "enabled": True,
+            "updated_at": datetime.now(timezone.utc).isoformat()}
 
 
 # ── PATCH /pipeline/{pipeline_id}/disable ─────────────────────────────────────
 
 @router.patch("/{pipeline_id}/disable")
-def disable_pipeline(pipeline_id: str):
-    """Pause a pipeline without deleting config or data."""
-    _assert_exists(pipeline_id)
+def disable_pipeline(
+    pipeline_id:   str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    token = _token(x_ude_project)
+    _assert_exists(pipeline_id, token)
     _set_enabled(pipeline_id, False)
-    logger.info(f"[Pipeline API] '{pipeline_id}' disabled")
     return {
-        "pipeline_id": pipeline_id,
-        "enabled":     False,
+        "pipeline_id": pipeline_id, "enabled": False,
         "updated_at":  datetime.now(timezone.utc).isoformat(),
         "message":     f"Pipeline '{pipeline_id}' paused — resume with PATCH /enable",
     }
@@ -342,46 +362,36 @@ def disable_pipeline(pipeline_id: str):
 # ── DELETE /pipeline/{pipeline_id} ────────────────────────────────────────────
 
 @router.delete("/{pipeline_id}")
-def delete_pipeline(pipeline_id: str):
-    """
-    Deregister a pipeline — removes from Bigtable and filesystem.
-    Does not delete pipeline data from BigQuery.
-    """
-    _assert_exists(pipeline_id)
-
-    cfg = _pipeline_config(pipeline_id)
-    registered_via = cfg.get("registered_via", "filesystem")
-
-    ok = deregister_pipeline(pipeline_id)
-    if not ok:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to deregister pipeline '{pipeline_id}'",
-        )
-
-    logger.info(f"[Pipeline API] Deregistered pipeline: '{pipeline_id}'")
+def delete_pipeline(
+    pipeline_id:   str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    token = _token(x_ude_project)
+    _assert_exists(pipeline_id, token)
+    deregister_pipeline(pipeline_id, project_token=token)
     return {
-        "pipeline_id":   pipeline_id,
-        "status":        "deregistered",
+        "pipeline_id":     pipeline_id,
+        "status":          "deregistered",
         "deregistered_at": datetime.now(timezone.utc).isoformat(),
-        "note":          "Pipeline data in BigQuery was not deleted.",
+        "note":            "Pipeline data in BigQuery was not deleted.",
     }
 
 
 # ── POST /pipeline/{pipeline_id}/seed ─────────────────────────────────────────
 
 @router.post("/{pipeline_id}/seed")
-def seed_pipeline(pipeline_id: str, num_records: int = 100):
-    """Trigger synthetic data generator — unchanged."""
-    _assert_exists(pipeline_id)
+def seed_pipeline(
+    pipeline_id:   str,
+    num_records:   int           = 100,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    token = _token(x_ude_project)
+    _assert_exists(pipeline_id, token)
 
     if pipeline_id == "customers":
         import sys
         sys.path.insert(0, ".")
-        from data_generator.scenarios.happy_path import (
-            generate_customer,
-            publish_to_minisky,
-        )
+        from data_generator.scenarios.happy_path import generate_customer, publish_to_minisky
         records = [generate_customer(i) for i in range(1, num_records + 1)]
         publish_to_minisky("raw.customers", records)
         return {
@@ -391,7 +401,5 @@ def seed_pipeline(pipeline_id: str, num_records: int = 100):
             "timestamp":         datetime.now(timezone.utc).isoformat(),
         }
 
-    raise HTTPException(
-        status_code=400,
-        detail=f"Seed not configured for pipeline '{pipeline_id}'",
-    )
+    raise HTTPException(status_code=400,
+                        detail=f"Seed not configured for pipeline '{pipeline_id}'")
