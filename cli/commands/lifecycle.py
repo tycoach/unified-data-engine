@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+import click
 from rich.panel import Panel
 from rich.table import Table
 
@@ -170,7 +171,7 @@ def init(ctx: typer.Context) -> None:
     project_name = typer.prompt("Project name", default=cwd.name)
     env          = typer.prompt(
         "Environment", default="local",
-        type=typer.Choice(["local", "staging", "production"])
+        type=click.Choice(["local", "staging", "production"])
     )
     gcp_project  = typer.prompt(
         "GCP project ID (leave blank for MiniSky local dev)", default=""

@@ -221,7 +221,7 @@ def new(
     pid           = pipeline_id or typer.prompt("Pipeline ID (e.g. customers)")
     pid           = pid.strip().lower().replace("-", "_")
     natural_key   = typer.prompt(f"Natural key field for {pid}", default=f"{pid.rstrip('s')}_id")
-    scd_type      = typer.prompt("SCD type", default="2", type=typer.Choice(["1", "2"]))
+    scd_type      = typer.prompt("SCD type", default="2", type=click.Choice(["1", "2"]))
     subscription  = typer.prompt("Pub/Sub subscription ID", default=f"raw.{pid}-sub")
     null_threshold = typer.prompt("Null threshold (0.0–1.0)", default="0.05")
     late_arrival  = typer.prompt("Late arrival window", default="24h")
@@ -236,7 +236,7 @@ def new(
         if fname.strip().lower() == "done":
             break
         ftype    = typer.prompt(f"  Type for {fname}", default="string",
-                                type=typer.Choice(["string", "integer", "float", "boolean", "datetime"]))
+                                type=click.Choice(["string", "integer", "float", "boolean", "datetime"]))
         nullable = typer.confirm(f"  Is {fname} nullable?", default=True)
         fields[fname] = {"type": ftype, "nullable": nullable}
 
