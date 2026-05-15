@@ -52,6 +52,11 @@ app.add_typer(observe.app,   name="observe",   help="Observability — logs, met
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None, "--version", "-V",
+        help="Show ude version and exit.",
+        is_eager=True,
+    ),
     host: Optional[str] = typer.Option(
         None, "--host", "-H",
         help="UDE API host (overrides UDE_HOST env var and ~/.ude/config.yml)",
@@ -79,6 +84,10 @@ def main(
 
     [muted]Run [bold]ude COMMAND --help[/bold] for help on any command.[/muted]
     """
+    if version:
+        from cli import __version__
+        typer.echo(f"ude {__version__}")
+        raise typer.Exit()
     cfg = load_config(host=host, port=port)
     ctx.ensure_object(dict)
     ctx.obj = UDEContext(config=cfg, verbose=verbose, output_json=json_output)
