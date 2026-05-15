@@ -2,12 +2,11 @@
 """
 HTTP client for pipeline endpoints.
 
-Wraps the FastAPI /pipeline/* router.
-All methods return plain dicts — command files handle presentation.
-
 Endpoints consumed:
-    GET    /pipeline                          → list all pipelines
+    GET    /pipeline/                         → list all pipelines
     GET    /pipeline/{pipeline_id}            → get one pipeline
+    POST   /pipeline/                         → register a new pipeline
+    DELETE /pipeline/{pipeline_id}            → deregister a pipeline
     PATCH  /pipeline/{pipeline_id}/enable     → enable a pipeline
     PATCH  /pipeline/{pipeline_id}/disable    → disable a pipeline
 """
@@ -24,12 +23,7 @@ class PipelineClient(UDEHttpClient):
         super().__init__(config)
 
     def list(self) -> list[dict]:
-        """
-        List all registered pipelines.
-
-        Calls the base HTTP get() directly to avoid shadowing by the
-        typed get(pipeline_id) method defined below.
-        """
+        """List all registered pipelines."""
         result = UDEHttpClient.get(self, "/pipeline/")
         if result is None:
             return []
@@ -37,10 +31,11 @@ class PipelineClient(UDEHttpClient):
             return result
         return result.get("pipelines", [])
 
-    def get(self, pipeline_id: str) -> dict | None:
+    def fetch(self, pipeline_id: str) -> dict | None:
         """
         Get full detail for one pipeline.
-        Returns None if the pipeline is not found (404).
+        Returns None if not found (404).
+        Named fetch() to avoid shadowing UDEHttpClient.get().
         """
         from cli.core.errors import APIError
         try:
@@ -49,6 +44,16 @@ class PipelineClient(UDEHttpClient):
             if exc.status_code == 404:
                 return None
             raise
+
+    def register(self, config: dict) -> dict:
+        """
+        Register a new pipeline with the engine via POST /pipeline/.
+        """
+        return self.post("/pipeline/", body=config)
+
+    def deregister(self, pipeline_id: str) -> dict:
+        """Deregister a pipeline — removes from Bigtable and filesystem."""
+        return self.delete(f"/pipeline/{pipeline_id}")
 
     def set_enabled(self, pipeline_id: str, enabled: bool) -> dict:
         """Enable or disable a pipeline."""

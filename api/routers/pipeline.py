@@ -1,14 +1,16 @@
 # api/routers/pipeline.py
 """
 Pipeline management endpoints.
-    GET  /pipeline                    — list all pipelines
-    GET  /pipeline/{id}               — full pipeline detail
-    GET  /pipeline/{id}/status        — quick status check
 
-    PATCH /pipeline/{id}/enable       — resume a paused pipeline
-    PATCH /pipeline/{id}/disable      — pause a pipeline
-    GET   /pipeline/batches           — recent batch cycle summaries
-    POST  /pipeline/{id}/seed         — trigger data generator (unchanged)
+GET    /pipeline/                  — list all pipelines
+GET    /pipeline/batches           — recent batch cycle summaries
+GET    /pipeline/{id}              — full pipeline detail
+GET    /pipeline/{id}/status       — quick status check
+POST   /pipeline/                  — register a new pipeline (API store + filesystem)
+DELETE /pipeline/{id}              — deregister a pipeline
+PATCH  /pipeline/{id}/enable       — resume a paused pipeline
+PATCH  /pipeline/{id}/disable      — pause a pipeline
+POST   /pipeline/{id}/seed         — trigger data generator
 """
 
 import logging
@@ -16,14 +18,51 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, field_validator
 
-from config.loader import load_pipelines
-from engine.schema.registry import SchemaRegistry
+from config.loader import (
+    load_pipelines,
+    register_pipeline,
+    deregister_pipeline,
+    get_pipeline,
+)
 from engine.state.bigtable_client import BigtableClient
 from engine.state.checkpoint_manager import CheckpointManager
+from engine.schema.registry import SchemaRegistry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
+class PipelineRegisterRequest(BaseModel):
+    """Payload for POST /pipeline/ — register a new pipeline."""
+    pipeline_id:          str
+    subscription_id:      str
+    natural_key:          str
+    scd_type:             int   # 1 or 2
+    edge_case_mode:       str   = "quarantine"
+    null_threshold:       float = 0.05
+    late_arrival_window:  str   = "24h"
+    duplicate_window:     str   = "30m"
+    fields:               dict  = {}
+    dbt:                  dict  = {}
+
+    @field_validator("scd_type")
+    @classmethod
+    def scd_type_valid(cls, v):
+        if v not in (1, 2):
+            raise ValueError("scd_type must be 1 or 2")
+        return v
+
+    @field_validator("pipeline_id")
+    @classmethod
+    def pipeline_id_valid(cls, v):
+        import re
+        if not re.match(r'^[a-z][a-z0-9_]*$', v):
+            raise ValueError("pipeline_id must be lowercase alphanumeric with underscores")
+        return v
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -33,10 +72,7 @@ def _all_pipeline_ids() -> list[str]:
 
 
 def _pipeline_config(pipeline_id: str) -> dict:
-    for p in load_pipelines():
-        if p["pipeline_id"] == pipeline_id:
-            return p
-    return {}
+    return get_pipeline(pipeline_id) or {}
 
 
 def _assert_exists(pipeline_id: str) -> None:
@@ -48,7 +84,6 @@ def _assert_exists(pipeline_id: str) -> None:
 
 
 def _is_enabled(pipeline_id: str) -> bool:
-    """Read enabled state from Bigtable. Defaults True if never set."""
     client = BigtableClient()
     value  = client.get(f"enabled#{pipeline_id}")
     if value is None:
@@ -61,13 +96,62 @@ def _set_enabled(pipeline_id: str, enabled: bool) -> None:
     client.set(f"enabled#{pipeline_id}", str(enabled).lower())
 
 
-# ── GET /pipeline ─────────────────────────────────────────────────────────────
+# ── POST /pipeline/ ───────────────────────────────────────────────────────────
+
+@router.post("/", status_code=201)
+def create_pipeline(request: PipelineRegisterRequest):
+    """
+    Register a new pipeline with the engine.
+
+    Persists to Bigtable (primary store) and config/pipelines/ (write-through).
+    The engine picks up new pipelines on its next cycle — no restart needed.
+
+    This is the endpoint ude pipeline new calls after scaffolding local files.
+    3rd party users who install via pip never need filesystem access.
+    """
+    pipeline_id = request.pipeline_id
+
+    # Check for duplicate
+    existing = get_pipeline(pipeline_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Pipeline '{pipeline_id}' already exists. "
+                   f"Use PATCH /pipeline/{pipeline_id} to update it.",
+        )
+
+    config = request.model_dump()
+    config["registered_at"] = datetime.now(timezone.utc).isoformat()
+    config["registered_via"] = "api"
+
+    ok = register_pipeline(config)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to persist pipeline '{pipeline_id}' — check engine state store",
+        )
+
+    logger.info(f"[Pipeline API] Registered new pipeline: '{pipeline_id}'")
+
+    return {
+        "pipeline_id":    pipeline_id,
+        "status":         "registered",
+        "registered_at":  config["registered_at"],
+        "registered_via": "api",
+        "message":        (
+            f"Pipeline '{pipeline_id}' registered. "
+            f"The engine will pick it up on its next cycle."
+        ),
+    }
+
+
+# ── GET /pipeline/ ────────────────────────────────────────────────────────────
 
 @router.get("/")
 def list_pipelines():
     """
-    List all pipelines.
-
+    List all pipelines — filesystem + API-registered combined.
+    Returns fields the CLI client expects.
     """
     pipeline_ids = _all_pipeline_ids()
     registry     = SchemaRegistry()
@@ -90,7 +174,7 @@ def list_pipelines():
             "schema_version":     schema["version"] if schema else None,
             "last_batch_at":      last_batch["committed_at"] if last_batch else None,
             "last_batch_records": checkpoint["records_processed"] if checkpoint else 0,
-            # Backward-compatible extras for Streamlit UI
+            "registered_via":     cfg.get("registered_via", "filesystem"),
             "last_batch_id":      last_batch["batch_id"] if last_batch else None,
             "last_status":        checkpoint["status"] if checkpoint else "NEVER_RUN",
         })
@@ -103,12 +187,9 @@ def list_pipelines():
 @router.get("/batches")
 def list_batches(
     pipeline_id: Optional[str] = Query(None),
-    limit: int = Query(20),
+    limit:       int           = Query(20),
 ):
-    """
-    Recent batch cycle summaries for ude observe watch.
-    Returns the last N checkpoints shaped for the live terminal dashboard.
-    """
+    """Recent batch cycle summaries for ude observe watch."""
     pipeline_ids = _all_pipeline_ids()
     if pipeline_id:
         _assert_exists(pipeline_id)
@@ -154,11 +235,8 @@ def list_batches(
 # ── GET /pipeline/{pipeline_id} ───────────────────────────────────────────────
 
 @router.get("/{pipeline_id}")
-def get_pipeline(pipeline_id: str):
-    """
-    Full pipeline detail — config + schema fields + last batch.
-    Shaped for ude pipeline inspect.
-    """
+def get_pipeline_detail(pipeline_id: str):
+    """Full pipeline detail — config + schema fields + last batch."""
     _assert_exists(pipeline_id)
 
     cfg      = _pipeline_config(pipeline_id)
@@ -193,8 +271,8 @@ def get_pipeline(pipeline_id: str):
         "schema_version":      schema["version"] if schema else None,
         "schema_locked_at":    schema.get("locked_at") if schema else None,
         "fields":              schema.get("fields", {}) if schema else {},
+        "registered_via":      cfg.get("registered_via", "filesystem"),
         "last_batch":          last_batch,
-        # Backward-compatible extras
         "schema":              schema,
         "last_checkpoint":     last,
         "checkpoint_history":  history,
@@ -206,7 +284,7 @@ def get_pipeline(pipeline_id: str):
 
 @router.get("/{pipeline_id}/status")
 def pipeline_status(pipeline_id: str):
-    """Quick status check — shape extended with enabled field."""
+    """Quick status check."""
     _assert_exists(pipeline_id)
 
     manager = CheckpointManager(pipeline_id)
@@ -234,10 +312,7 @@ def pipeline_status(pipeline_id: str):
 
 @router.patch("/{pipeline_id}/enable")
 def enable_pipeline(pipeline_id: str):
-    """
-    Resume a paused pipeline.
-    Stores enabled=true in Bigtable — engine reads this before each pull.
-    """
+    """Resume a paused pipeline."""
     _assert_exists(pipeline_id)
     _set_enabled(pipeline_id, True)
     logger.info(f"[Pipeline API] '{pipeline_id}' enabled")
@@ -252,10 +327,7 @@ def enable_pipeline(pipeline_id: str):
 
 @router.patch("/{pipeline_id}/disable")
 def disable_pipeline(pipeline_id: str):
-    """
-    Pause a pipeline without deleting config or data.
-    Engine checks enabled state before each batch pull.
-    """
+    """Pause a pipeline without deleting config or data."""
     _assert_exists(pipeline_id)
     _set_enabled(pipeline_id, False)
     logger.info(f"[Pipeline API] '{pipeline_id}' disabled")
@@ -267,11 +339,40 @@ def disable_pipeline(pipeline_id: str):
     }
 
 
+# ── DELETE /pipeline/{pipeline_id} ────────────────────────────────────────────
+
+@router.delete("/{pipeline_id}")
+def delete_pipeline(pipeline_id: str):
+    """
+    Deregister a pipeline — removes from Bigtable and filesystem.
+    Does not delete pipeline data from BigQuery.
+    """
+    _assert_exists(pipeline_id)
+
+    cfg = _pipeline_config(pipeline_id)
+    registered_via = cfg.get("registered_via", "filesystem")
+
+    ok = deregister_pipeline(pipeline_id)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deregister pipeline '{pipeline_id}'",
+        )
+
+    logger.info(f"[Pipeline API] Deregistered pipeline: '{pipeline_id}'")
+    return {
+        "pipeline_id":   pipeline_id,
+        "status":        "deregistered",
+        "deregistered_at": datetime.now(timezone.utc).isoformat(),
+        "note":          "Pipeline data in BigQuery was not deleted.",
+    }
+
+
 # ── POST /pipeline/{pipeline_id}/seed ─────────────────────────────────────────
 
 @router.post("/{pipeline_id}/seed")
 def seed_pipeline(pipeline_id: str, num_records: int = 100):
-    """Trigger synthetic data generator — unchanged from original."""
+    """Trigger synthetic data generator — unchanged."""
     _assert_exists(pipeline_id)
 
     if pipeline_id == "customers":
