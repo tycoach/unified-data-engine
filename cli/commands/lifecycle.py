@@ -463,33 +463,62 @@ def _bg(cmd: str) -> None:
 def _provision(cfg) -> None:
     """
     Provision Pub/Sub topics and BigQuery datasets on MiniSky.
-    Reads registered pipelines and creates topics/subscriptions for each.
+
+    Reads ALL registered pipelines — filesystem AND every API-registered
+    pipeline across all project tokens — and creates topics/subscriptions.
     Idempotent — safe to run on every startup.
     """
     import urllib.request
     import json
+    import logging as _logging
 
     minisky = cfg.minisky_url
     project = "local-dev-project"
 
-    # Load all registered pipelines to get their subscription IDs
+    # Suppress INFO logs from loader and bigtable during this step
+    for _log_name in ("config.loader", "engine.state.bigtable_client"):
+        _logging.getLogger(_log_name).setLevel(_logging.WARNING)
+
+    # Collect pipelines from ALL sources:
+    #   1. Filesystem (config/pipelines/*.yml)
+    #   2. ALL Bigtable keys — across every project token
+    #      (load_pipelines() with a token only returns that token's pipelines,
+    #       so we scan Bigtable directly to get everything)
+    pipelines = []
+    seen_ids  = set()
+
+    # Filesystem pipelines
     try:
-        import logging as _logging
-        # Suppress loader INFO logs during provisioning step
-        _loader_logger = _logging.getLogger("config.loader")
-        _bigtable_logger = _logging.getLogger("engine.state.bigtable_client")
-        _orig_loader = _loader_logger.level
-        _orig_bt = _bigtable_logger.level
-        _loader_logger.setLevel(_logging.WARNING)
-        _bigtable_logger.setLevel(_logging.WARNING)
-
-        from config.loader import load_pipelines
-        pipelines = load_pipelines()
-
-        _loader_logger.setLevel(_orig_loader)
-        _bigtable_logger.setLevel(_orig_bt)
+        from config.loader import _load_from_filesystem
+        for p in _load_from_filesystem():
+            pid = p.get("pipeline_id")
+            if pid and pid not in seen_ids:
+                pipelines.append(p)
+                seen_ids.add(pid)
     except Exception:
-        pipelines = []
+        pass
+
+    # All Bigtable pipeline_config# keys — regardless of token namespace
+    try:
+        from engine.state.bigtable_client import BigtableClient
+        client   = BigtableClient()
+        all_keys = client.all_keys()
+        for key in all_keys:
+            if not key.startswith("pipeline_config#"):
+                continue
+            config = client.get(key)
+            if not config or not isinstance(config, dict):
+                continue
+            pid = config.get("pipeline_id")
+            if pid and pid not in seen_ids:
+                pipelines.append(config)
+                seen_ids.add(pid)
+    except Exception:
+        pass
+
+    # Restore log levels
+    for _log_name in ("config.loader", "engine.state.bigtable_client"):
+        _logging.getLogger(_log_name).setLevel(_logging.INFO)
 
     # Always create the standard BigQuery datasets
     datasets = ["raw_staging", "snapshots", "marts", "quarantine"]
@@ -565,10 +594,12 @@ def _provision(cfg) -> None:
     n_topics = len(created_topics)
     n_subs   = len(created_subs)
     n_ds     = len(datasets)
+    n_total  = len(pipelines)
 
     print_success(
-        f"Provisioned {n_topics} topic(s) · {n_subs} subscription(s)"
-        f" · {n_ds} datasets"
+        f"Verified {n_topics}/{n_total} topic(s) · "
+        f"{n_subs}/{n_total} subscription(s) · "
+        f"{n_ds} datasets ready"
     )
 
 
