@@ -18,7 +18,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from pydantic import BaseModel
 
 from engine.state.bigtable_client import BigtableClient

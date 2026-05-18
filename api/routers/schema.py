@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from pydantic import BaseModel
 
 from engine.schema.contract_writer import read_contract, write_contract
@@ -44,10 +44,21 @@ class SyncRequest(BaseModel):
 # ── GET /schema ───────────────────────────────────────────────────────────────
 
 @router.get("/")
-def list_schemas():
-    """List all locked schemas — unchanged."""
+def list_schemas(
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    """List locked schemas — scoped to project token."""
+    token    = x_ude_project or "__engine__"
     registry = SchemaRegistry()
     schemas  = registry.all_schemas()
+
+    # Engine owner sees everything; external tokens see only their schemas
+    if token != "__engine__":
+        schemas = [
+            s for s in schemas
+            if s.get("project_token") == token
+        ]
+
     return {"schemas": schemas, "total": len(schemas)}
 
 
@@ -258,7 +269,10 @@ def schema_diff(pipeline_id: str):
 # ── GET /schema/{pipeline_id} ─────────────────────────────────────────────────
 
 @router.get("/{pipeline_id}")
-def get_schema(pipeline_id: str):
+def get_schema(
+    pipeline_id: str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
     """Get locked schema for a pipeline — unchanged."""
     registry = SchemaRegistry()
     schema   = registry.get_locked(pipeline_id)
@@ -274,8 +288,12 @@ def get_schema(pipeline_id: str):
 # ── GET /schema/{pipeline_id}/contract ───────────────────────────────────────
 
 @router.get("/{pipeline_id}/contract")
-def get_contract(pipeline_id: str):
-    """View current dbt source contract — unchanged."""
+def get_contract(
+    pipeline_id: str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    """View current dbt source contract — scoped to project token."""
+    token = x_ude_project or "__engine__"
     contract = read_contract()
     if not contract:
         raise HTTPException(

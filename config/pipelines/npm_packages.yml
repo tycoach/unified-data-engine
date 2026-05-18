@@ -1,0 +1,57 @@
+pipeline_id: npm_packages
+subscription_id: raw.npm_packages-sub
+natural_key: package_name
+scd_type: 1
+edge_case_mode: quarantine
+null_threshold: 0.02
+late_arrival_window: 24h
+duplicate_window: 30m
+fields:
+  package_name:
+    type: string
+    nullable: false
+  latest_version:
+    type: string
+    nullable: false
+  description:
+    type: string
+    nullable: true
+  author:
+    type: string
+    nullable: true
+  license:
+    type: string
+    nullable: true
+  weekly_downloads:
+    type: integer
+    nullable: true
+  total_versions:
+    type: integer
+    nullable: false
+  homepage:
+    type: string
+    nullable: true
+  repository_url:
+    type: string
+    nullable: true
+  keywords:
+    type: string
+    nullable: true
+  updated_at:
+    type: datetime
+    nullable: false
+dbt:
+  snapshot: null
+  staging_model: npm_packages_staged
+  mart_model: dim_npm_packages
+  snapshot_strategy: null
+  invalidate_hard_deletes: false
+  tests:
+  - not_null:
+    - package_name
+    - latest_version
+    - updated_at
+  - unique:
+    - package_name
+registered_at: '2026-05-15T22:05:04.226802+00:00'
+registered_via: api

@@ -78,9 +78,12 @@ def _contract_html(pid: str, schema: dict) -> str:
 </div>"""
 
 
-def render():
+def render(client=None):
+    if client is None:
+        from auth import get_client
+        client = get_client()
     # GET /schema/ → {"schemas": [...], "total": N}
-    raw = _get("/schema/", {}) or {}
+    raw = client.get("/schema/", {}) or {}
 
     # Extract list from {"schemas": [...]}
     schemas_list = raw.get("schemas", [])
@@ -149,7 +152,7 @@ def render():
 
     # Load full schema for selected pipeline
     # Try dedicated endpoint first, fall back to list data
-    schema = _get(f"/schema/{selected_pid}", None)
+    schema = client.get(f"/schema/{selected_pid}", None)
     if not isinstance(schema, dict) or not schema:
         schema = all_schemas.get(selected_pid, {})
     if not isinstance(schema, dict):
@@ -282,5 +285,5 @@ def render():
             st.rerun()
     with col2:
         if st.button("⟳  Schema Sync", key="schema_sync"):
-            _get(f"/schema/{selected_pid}/sync", {})
+            client.get(f"/schema/{selected_pid}/sync", {})
             st.success("schema.yml regenerated from registry.")

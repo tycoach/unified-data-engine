@@ -6,7 +6,8 @@
 # GET  /dbt/artifacts           — list available dbt artifacts
 
 import logging
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, BackgroundTasks
+from typing import Optional
 from pydantic import BaseModel
 from datetime import datetime, timezone
 
@@ -92,7 +93,10 @@ def dbt_results():
 
 
 @router.get("/lineage/{pipeline_id}")
-def dbt_lineage(pipeline_id: str):
+def dbt_lineage(
+    pipeline_id: str,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
     """
     Get model lineage for a pipeline from manifest.json.
     Returns DAG of model dependencies for operator UI.

@@ -1,0 +1,50 @@
+pipeline_id: hn_stories
+subscription_id: raw.hn_stories-sub
+natural_key: story_id
+scd_type: 2
+edge_case_mode: quarantine
+null_threshold: 0.05
+late_arrival_window: 48h
+duplicate_window: 30m
+fields:
+  story_id:
+    type: string
+    nullable: false
+  title:
+    type: string
+    nullable: false
+  author:
+    type: string
+    nullable: false
+  url:
+    type: string
+    nullable: true
+  score:
+    type: integer
+    nullable: false
+  num_comments:
+    type: integer
+    nullable: false
+  story_type:
+    type: string
+    nullable: false
+  tags:
+    type: string
+    nullable: true
+  updated_at:
+    type: datetime
+    nullable: false
+dbt:
+  snapshot: hn_stories_snapshot
+  staging_model: hn_stories_staged
+  mart_model: null
+  snapshot_strategy: timestamp
+  invalidate_hard_deletes: true
+  tests:
+  - not_null:
+    - story_id
+    - updated_at
+  - unique:
+    - story_id
+registered_at: '2026-05-15T22:05:05.106127+00:00'
+registered_via: api

@@ -1,0 +1,60 @@
+pipeline_id: git_repos
+subscription_id: raw.git_repos-sub
+natural_key: repo_full_name
+scd_type: 2
+edge_case_mode: quarantine
+null_threshold: 0.05
+late_arrival_window: 24h
+duplicate_window: 30m
+fields:
+  repo_full_name:
+    type: string
+    nullable: false
+  repo_name:
+    type: string
+    nullable: false
+  owner:
+    type: string
+    nullable: false
+  description:
+    type: string
+    nullable: true
+  stars:
+    type: integer
+    nullable: false
+  forks:
+    type: integer
+    nullable: false
+  open_issues:
+    type: integer
+    nullable: false
+  watchers:
+    type: integer
+    nullable: false
+  language:
+    type: string
+    nullable: true
+  topics:
+    type: string
+    nullable: true
+  is_archived:
+    type: boolean
+    nullable: false
+  updated_at:
+    type: datetime
+    nullable: false
+dbt:
+  staging_model: git_repos_staged
+  mart_model: dim_git_repos
+  snapshot: git_repos_snapshot
+  snapshot_strategy: timestamp
+  check_cols: []
+  invalidate_hard_deletes: true
+  tests:
+  - not_null:
+    - repo_full_name
+    - updated_at
+  - unique:
+    - repo_full_name
+registered_at: '2026-05-15T22:05:03.418658+00:00'
+registered_via: api

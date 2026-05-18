@@ -1,6 +1,6 @@
 # dbt/models/staging/_sources.yml
 # AUTO-MANAGED by UDE schema registry
-# Last updated: 2026-05-12T14:34:51.340631+00:00
+# Last updated: 2026-05-18T14:35:48.381335+00:00
 # DO NOT EDIT columns manually — use make schema-sync
 
 version: 2
@@ -61,3 +61,161 @@ sources:
     - name: in_stock
     - name: updated_at
     - name: batch_id
+  - name: hn_stories_staged
+    description: "Hn_stories source \u2014 schema v1 (locked 2026-05-15)"
+    config:
+      contract:
+        enforced: true
+    columns:
+    - name: story_id
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: title
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: author
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: url
+      data_type: varchar
+    - name: score
+      data_type: int64
+      constraints:
+      - type: not_null
+    - name: num_comments
+      data_type: int64
+      constraints:
+      - type: not_null
+    - name: story_type
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: tags
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: updated_at
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: batch_id
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: batch_id
+      data_type: varchar
+  - name: npm_packages_staged
+    description: "Npm_packages source \u2014 schema v2 (locked 2026-05-15)"
+    config:
+      contract:
+        enforced: true
+    columns:
+    - name: package_name
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: latest_version
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: description
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: author
+      data_type: varchar
+    - name: license
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: weekly_downloads
+      data_type: int64
+    - name: total_versions
+      data_type: int64
+      constraints:
+      - type: not_null
+    - name: homepage
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: repository_url
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: keywords
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: updated_at
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: batch_id
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: batch_id
+      data_type: varchar
+  - name: git_repos_staged
+    description: "Git_repos source \u2014 schema v1 (locked 2026-05-18)"
+    config:
+      contract:
+        enforced: true
+    columns:
+    - name: repo_full_name
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: repo_name
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: owner
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: description
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: stars
+      data_type: int64
+      constraints:
+      - type: not_null
+    - name: forks
+      data_type: int64
+      constraints:
+      - type: not_null
+    - name: open_issues
+      data_type: int64
+      constraints:
+      - type: not_null
+    - name: watchers
+      data_type: int64
+      constraints:
+      - type: not_null
+    - name: language
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: topics
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: is_archived
+      data_type: bool
+      constraints:
+      - type: not_null
+    - name: updated_at
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: batch_id
+      data_type: varchar
+      constraints:
+      - type: not_null
+    - name: batch_id
+      data_type: varchar

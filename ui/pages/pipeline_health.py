@@ -35,41 +35,44 @@ def _fmt_ts(ts: str) -> str:
 
 # ── Data loaders — matched to real API endpoints ──────────────────────────────
 
-def load_pipelines() -> list:
+def load_pipelines(client) -> list:
     """GET /pipeline/ → {pipelines: [...], total: N}"""
-    raw = _get("/pipeline/", {}) or {}
+    raw = client.get("/pipeline/", {}) or {}
     return raw.get("pipelines", [])
 
 
-def load_pipeline_detail(pid: str) -> dict:
+def load_pipeline_detail(client, pid: str) -> dict:
     """GET /pipeline/{id} → pipeline detail + checkpoint history"""
-    return _get(f"/pipeline/{pid}", {}) or {}
+    return client.get(f"/pipeline/{pid}", {}) or {}
 
 
-def load_pipeline_status(pid: str) -> dict:
+def load_pipeline_status(client, pid: str) -> dict:
     """GET /pipeline/{id}/status → quick status"""
-    return _get(f"/pipeline/{pid}/status", {}) or {}
+    return client.get(f"/pipeline/{pid}/status", {}) or {}
 
 
-def load_schema(pid: str) -> dict:
+def load_schema(client, pid: str) -> dict:
     """GET /schema/{id} → locked schema"""
-    return _get(f"/schema/{pid}", {}) or {}
+    return client.get(f"/schema/{pid}", {}) or {}
 
 
-def load_dbt_status(pid: str) -> dict:
+def load_dbt_status(client, pid: str) -> dict:
     """GET /dbt/status → last dbt run info"""
-    return _get("/dbt/status", {}) or {}
+    return client.get("/dbt/status", {}) or {}
 
 
 # ── Render ────────────────────────────────────────────────────────────────────
 
-def render():
+def render(client=None):
+    if client is None:
+        from auth import get_client
+        client = get_client()
     st.markdown(page_header(
         "📊", "Pipeline Health",
         "Checkpoint history, batch stats, and schema fields per pipeline"
     ), unsafe_allow_html=True)
 
-    pipelines = load_pipelines()
+    pipelines = load_pipelines(client)
     pipeline_ids = [
         p.get("pipeline_id", p) if isinstance(p, dict) else p
         for p in pipelines
@@ -96,9 +99,9 @@ def render():
     )
 
     # Detail endpoint gives checkpoint history
-    detail      = load_pipeline_detail(selected_pid)
-    schema_data = load_schema(selected_pid)
-    dbt_data    = load_dbt_status(selected_pid)
+    detail      = load_pipeline_detail(client, selected_pid)
+    schema_data = load_schema(client, selected_pid)
+    dbt_data    = load_dbt_status(client, selected_pid)
 
     # ── Stats row — from /pipeline/ summary ───────────────────────────────────
     last_status  = p_summary.get("last_status", "NEVER_RUN")

@@ -1,5 +1,5 @@
 """
-ui/pages/overview.py — Engine overview page
+ui/pages/overview.py — Engine overview (project-scoped)
 """
 
 import streamlit as st
@@ -7,48 +7,30 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from theme import page_header, badge, section_label
-import requests
 from datetime import datetime
-
-API = os.getenv("UDE_API_URL", "http://localhost:8000")
-
-
-def _get(path: str, fallback=None):
-    try:
-        r = requests.get(f"{API}{path}", timeout=3)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return fallback
 
 
 def _fmt_ts(ts: str) -> str:
     if not ts:
         return "—"
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M UTC")
+        return datetime.fromisoformat(
+            str(ts).replace("Z", "+00:00")
+        ).strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         return str(ts)
 
 
-def render():
-    # ── Fetch from real endpoints ─────────────────────────────────────────────
-    # GET /health/  → {status, minisky_connected, state_keys, engine}
-    health_raw = _get("/health/", {}) or {}
+def render(client=None):
+    # Fallback client if called without one (dev mode)
+    if client is None:
+        from auth import get_client
+        client = get_client()
 
-    # GET /pipeline/ → {pipelines: [...], total: N}
-    pipeline_raw = _get("/pipeline/", {}) or {}
-    pipelines_raw = pipeline_raw.get("pipelines", [])
-
-    # ── Map API fields → template fields ──────────────────────────────────────
-    # API returns:
-    #   pipeline_id, scd_type, enabled, schema_version,
-    #   last_batch_at, last_batch_records, last_batch_id, last_status
-    pipelines = []
-    for p in pipelines_raw:
-        if not isinstance(p, dict):
-            continue
-        pipelines.append(p)
+    # ── Fetch data ────────────────────────────────────────────────────────────
+    health_raw   = client.get("/health/", {}) or {}
+    pipeline_raw = client.get("/pipeline/", {}) or {}
+    pipelines    = pipeline_raw.get("pipelines", [])
 
     engine_status = health_raw.get("status", "UNKNOWN").upper()
     minisky_ok    = health_raw.get("minisky_connected", False)
@@ -65,13 +47,13 @@ def render():
 
     st.markdown(page_header(
         "⚙️", "Overview",
-        "Engine health, MiniSky status, and pipeline summary"
+        f"Engine health, MiniSky status, and pipeline summary "
+        f"— project: {client.project_name}"
     ), unsafe_allow_html=True)
 
     # ── Stat row ──────────────────────────────────────────────────────────────
     st.markdown(f"""
 <div class="ude-stats">
-
   <div class="ude-stat">
     <div class="ude-stat-label">Engine Status</div>
     <div class="ude-stat-indicator" style="color:{engine_color}">
@@ -80,7 +62,6 @@ def render():
       {engine_status}
     </div>
   </div>
-
   <div class="ude-stat">
     <div class="ude-stat-label">MiniSky</div>
     <div class="minisky-chip"
@@ -90,19 +71,16 @@ def render():
       {minisky_label}
     </div>
   </div>
-
   <div class="ude-stat">
     <div class="ude-stat-label">State Keys</div>
     <div class="ude-stat-value">{state_keys:,}</div>
     <div class="ude-stat-sub">Bigtable checkpoints</div>
   </div>
-
   <div class="ude-stat">
-    <div class="ude-stat-label">Active Pipelines</div>
+    <div class="ude-stat-label">Your Pipelines</div>
     <div class="ude-stat-value {'green' if n_degraded == 0 else 'amber'}">{n_pipelines}</div>
     <div class="ude-stat-sub">{n_degraded} degraded</div>
   </div>
-
 </div>
 """, unsafe_allow_html=True)
 
@@ -110,10 +88,10 @@ def render():
     st.markdown(section_label("Pipeline Summary"), unsafe_allow_html=True)
 
     if not pipelines:
-        st.markdown("""
+        st.markdown(f"""
 <div class="ude-card" style="color:#5a5f6e;font-size:13px;text-align:center;padding:30px">
-  No pipelines found. Make sure the API is running and pipelines are registered
-  in <code>config/pipelines/</code>.
+  No pipelines found for project <code>{client.project_name}</code>.<br>
+  Run <code>ude pipeline new</code> to register your first pipeline.
 </div>
 """, unsafe_allow_html=True)
     else:
@@ -138,34 +116,25 @@ def render():
             status     = p.get("last_status", "NEVER_RUN")
             scd        = p.get("scd_type", "?")
             schema_ver = p.get("schema_version", "?")
-            enabled    = p.get("enabled", True)
             last_at    = _fmt_ts(p.get("last_batch_at", ""))
             last_rec   = p.get("last_batch_records", 0)
             last_id    = (p.get("last_batch_id") or "")[:8]
+            model      = "snapshot" if scd == 2 else "incremental"
 
             icon, icon_cls = _ICONS.get(pid, ("📁", "gray"))
             bk, bl = _STATUS_MAP.get(status, ("never", status))
 
-            model = "snapshot" if scd == 2 else "incremental"
-
-            if last_id:
-                b_line = f"Batch #{last_id} · {last_rec:,} records · {last_at}"
-            else:
-                b_line = "Awaiting first batch"
-
-            enabled_dot = (
-                '<span style="color:#1D9E75">●</span>' if enabled
-                else '<span style="color:#3a3f4e">●</span>'
+            b_line = (
+                f"Batch #{last_id} · {last_rec:,} records · {last_at}"
+                if last_id else "Awaiting first batch"
             )
 
             cards_html += f"""
 <div class="ude-pipeline-card">
   <div class="pl-icon {icon_cls}">{icon}</div>
   <div class="pl-info">
-    <div class="pl-name">{enabled_dot} {pid}</div>
-    <div class="pl-meta">
-      SCD Type {scd} · {model} · schema v{schema_ver}
-    </div>
+    <div class="pl-name">{pid}</div>
+    <div class="pl-meta">SCD Type {scd} · {model} · schema v{schema_ver}</div>
   </div>
   <div class="pl-right">
     {badge(bl, bk)}
@@ -175,7 +144,7 @@ def render():
 
         st.markdown(cards_html, unsafe_allow_html=True)
 
-    # ── Recent alerts — derived from real pipeline statuses ───────────────────
+    # ── Alerts ────────────────────────────────────────────────────────────────
     st.markdown(section_label("Recent Alerts"), unsafe_allow_html=True)
 
     alerts = []
@@ -192,35 +161,26 @@ def render():
         elif status in ("FAILED", "DBT_FAILED"):
             alerts.append({
                 "level":   "warning",
-                "message": f"Pipeline <code>{pid}</code> last batch FAILED — retrying next cycle.",
+                "message": f"Pipeline <code>{pid}</code> last batch FAILED — retrying.",
                 "time":    last_at,
             })
 
     if not alerts:
-        alerts = [{
-            "level":   "info",
-            "message": "No recent alerts — all pipelines nominal.",
-            "time":    "",
-        }]
+        alerts = [{"level": "info", "message": "No recent alerts — all pipelines nominal.", "time": ""}]
 
     _LEVEL_MAP = {"critical": "critical", "warning": "warning", "info": "never"}
     rows_html = ""
     for a in alerts:
         lvl = a.get("level", "info")
-        msg = a.get("message", "")
-        ts  = a.get("time", "")
         bk  = _LEVEL_MAP.get(lvl, "never")
         rows_html += f"""
 <div class="ude-alert-row">
   {badge(lvl.upper(), bk)}
-  <div class="ude-alert-msg">{msg}</div>
-  <div class="ude-alert-time">{ts}</div>
+  <div class="ude-alert-msg">{a.get('message', '')}</div>
+  <div class="ude-alert-time">{a.get('time', '')}</div>
 </div>"""
 
-    st.markdown(
-        f'<div class="ude-alert-list">{rows_html}</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(f'<div class="ude-alert-list">{rows_html}</div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("↻  Refresh", key="overview_refresh"):

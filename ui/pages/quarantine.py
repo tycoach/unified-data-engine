@@ -117,8 +117,11 @@ def _fmt_ts(ts: str) -> str:
 
 # ── Render ────────────────────────────────────────────────────────────────────
 
-def render():
-    raw = _get("/quarantine/", [])
+def render(client=None):
+    if client is None:
+        from auth import get_client
+        client = get_client()
+    raw = client.get("/quarantine/", [])
     quarantine_items = _normalise(raw)
 
     n_broken  = sum(1 for q in quarantine_items if "BROKEN"  in str(q.get("failure_reason", "")))
@@ -200,7 +203,7 @@ def render():
         with btn_col1:
             label = "Approve migration" if is_broken else "Accept evolution"
             if st.button(f"✓  {label}", key=f"approve_{batch_id}", type="primary"):
-                result = _post(f"/schema/{pid}/approve-migration", {
+                result = client.post(f"/schema/{pid}/approve-migration", {
                     "batch_id": batch_id,
                     "reason": "Approved via operator dashboard",
                 })
@@ -212,7 +215,7 @@ def render():
 
         with btn_col2:
             if st.button("✕  Reject batch", key=f"reject_{batch_id}"):
-                result = _post(f"/quarantine/{batch_id}/reject", {})
+                result = client.post(f"/quarantine/{batch_id}/reject", {})
                 if "error" in (result or {}):
                     st.error(f"API error: {result['error']}")
                 else:
@@ -221,7 +224,7 @@ def render():
 
         with btn_col3:
             with st.expander("🔍 View records"):
-                raw_records = _get(f"/quarantine/{pid}/records", {})
+                raw_records = client.get(f"/quarantine/{pid}/records", {})
                 records_list = _normalise_records(raw_records)
                 if records_list:
                     st.json(records_list[:5])
