@@ -21,7 +21,7 @@ from cli.core.checks import assert_project_exists, assert_stack_running
 from cli.core.context import UDEContext
 from cli.output.console import console, print_error, print_info, print_success, print_warning
 
-app = typer.Typer(help="Schema operations — sync, history, diff, approve")
+app = typer.Typer(help="Schema operations — show, sync, history, diff, approve")
 
 
 def _ctx(ctx: typer.Context) -> UDEContext:
@@ -288,4 +288,94 @@ def approve(
     print_success(f"Migration approved. Schema updated to v{result.get('new_version', '?')}.")
     print_info("dbt contract regenerated → dbt/models/staging/_sources.yml")
     print_info("Quarantined batches released for replay on next cycle.")
+    console.print()
+
+# ── ude schema show ───────────────────────────────────────────────────────────
+
+@app.command(name="show")
+def show(
+    ctx: typer.Context,
+    pipeline_id: str = typer.Argument(..., help="Pipeline ID to inspect schema for"),
+) -> None:
+    """
+    Show the locked schema for a pipeline — field names, types, and constraints.
+
+    Use this to inspect what schema the engine has locked before sending
+    data or after registering a new pipeline.
+    """
+    assert_stack_running(_ctx(ctx).config)
+
+    from cli.client.schema import SchemaClient
+    from cli.client.http import UDEHttpClient
+    from cli.core.errors import APIError
+    client = SchemaClient(_ctx(ctx).config)
+
+    try:
+        schema = UDEHttpClient.get(client, f"/schema/{pipeline_id}")
+    except APIError as exc:
+        if exc.status_code == 404:
+            print_warning(f"No locked schema for '{pipeline_id}' yet.")
+            print_info("The schema is locked on the pipeline's first batch.")
+            print_info("Seed data with: make seed")
+            raise typer.Exit()
+        raise
+
+    if not schema:
+        print_warning(f"No locked schema for '{pipeline_id}' yet.")
+        raise typer.Exit()
+
+    fields    = schema.get("fields", {})
+    version   = schema.get("version", "—")
+    locked_at = schema.get("locked_at", "—")
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="muted", min_width=16)
+    summary.add_column(style="bold")
+    summary.add_row("Pipeline",  pipeline_id)
+    summary.add_row("Version",   f"v{version}")
+    summary.add_row("Locked at", locked_at)
+    summary.add_row("Fields",    str(len(fields)))
+
+    console.print()
+    console.print(Panel(
+        summary,
+        title=f"[pipeline]{pipeline_id}[/pipeline] · locked schema",
+        border_style="blue",
+        padding=(1, 2),
+    ))
+
+    if fields:
+        field_table = Table(
+            show_header=True, header_style="bold",
+            box=None, padding=(0, 2),
+        )
+        field_table.add_column("Field",    min_width=20)
+        field_table.add_column("Type",     min_width=12)
+        field_table.add_column("Nullable", justify="center", min_width=10)
+
+        for fname, fmeta in fields.items():
+            if isinstance(fmeta, dict):
+                ftype    = fmeta.get("type", "—")
+                nullable = fmeta.get("nullable", True)
+            else:
+                ftype    = str(fmeta)
+                nullable = True
+
+            nullable_str = "[muted]yes[/muted]" if nullable else "[bold]no[/bold]"
+            field_table.add_row(fname, ftype, nullable_str)
+
+        console.print(Panel(
+            field_table,
+            title=f"[pipeline]{pipeline_id}[/pipeline] · fields",
+            border_style="blue",
+            padding=(1, 2),
+        ))
+    else:
+        print_warning("No field definitions in locked schema.")
+
+    console.print()
+    console.print(
+        f"  [muted]Run [bold]ude schema history {pipeline_id}[/bold] "
+        f"to see version timeline.[/muted]"
+    )
     console.print()
