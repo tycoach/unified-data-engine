@@ -46,7 +46,15 @@ def render(client=None):
     # ── Pipeline lineage ──────────────────────────────────────────────────────
     st.subheader("Model Lineage by Pipeline")
 
-    pipeline_id = st.selectbox("Select Pipeline", ["customers", "orders"])
+    # Get pipelines scoped to this project token
+    pipeline_raw = client.get("/pipeline/", {}) or {}
+    pipeline_ids = [p["pipeline_id"] for p in pipeline_raw.get("pipelines", [])]
+
+    if not pipeline_ids:
+        st.info("No pipelines registered for this project. Run `ude pipeline new` to add one.")
+        return
+
+    pipeline_id = st.selectbox("Select Pipeline", pipeline_ids)
 
     lineage_data = client.get(f"/dbt/lineage/{pipeline_id}")
 
@@ -121,7 +129,7 @@ def render(client=None):
             "target": "dev",
         }).encode()
         req = urllib.request.Request(
-            f"{API_BASE}/dbt/run/{pipeline_id}",
+            f"{client.base_url}/dbt/run/{pipeline_id}",
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
