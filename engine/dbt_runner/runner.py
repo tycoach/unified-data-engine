@@ -48,7 +48,7 @@ class DbtRunner:
             "--project-dir", str(self.dbt_dir),
             "--profiles-dir", str(self.profiles_dir),
             "--target", self.target,
-            "--vars", f"{{batch_id: '{batch_id}'}}",
+            "--vars", f'{{"batch_id": "{batch_id}"}}',
             "--no-use-colors",
         ]
 
