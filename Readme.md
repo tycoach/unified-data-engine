@@ -141,7 +141,7 @@ ude up
   [4/6] FastAPI          ✓ ready at :8000
   [5/6] Streamlit UI     ✓ ready at :8501
   [6/6] Monitoring       ✓ Grafana at :3000
-  
+
   ✓ UDE stack is up.
 ```
 
@@ -349,7 +349,6 @@ ude pipeline register events   # register with running engine
 ## Schema Operations
 
 ```bash
-# Inspect the locked schema for a pipeline
 ude schema show git_repos
 ```
 
@@ -401,11 +400,7 @@ Five pages at `http://localhost:8501`:
 
 ## API — Control Plane
 
-```
-
 ![ude controlpanel](assets/ude-cp.png)
-
----
 
 FastAPI at `http://localhost:8000/docs` — 20+ endpoints across 6 routers.
 
@@ -428,6 +423,10 @@ All endpoints are scoped to `X-UDE-Project` header — external callers only see
 ```bash
 ude observe start   # starts Prometheus + Pushgateway + Grafana via Docker
 ```
+
+![Grafana — Engine Overview](assets/grafana.png)
+
+![Grafana — dbt Health](assets/grafana_2.png)
 
 Prometheus scrapes `http://localhost:8000/metrics` + Pushgateway at `:9091`.
 
@@ -466,7 +465,7 @@ MiniSky loses all Pub/Sub and BigQuery state on restart. Simply run:
 ude up
 ```
 
-`ude up` automatically detects MiniSky is running and re-provisions all topics and subscriptions for every registered pipeline — filesystem and API-registered — before starting any other service. No manual `make provision` needed.
+`ude up` automatically re-provisions all topics and subscriptions for every registered pipeline — filesystem and API-registered — before starting any other service. No manual `make provision` needed.
 
 ---
 
