@@ -2,4 +2,4 @@
 ude — Unified Data Engine CLI package.
 """
 
-__version__ = "1.2.0"
+__version__ = "2.6.0"
