@@ -43,8 +43,22 @@ from cli.output.console import console, print_error, print_info, print_success, 
 app = typer.Typer(help="Stack lifecycle — up, down, status, seed, init")
 
 _MONITORING_COMPOSE_PATH = Path.home() / ".ude" / "monitoring-compose.yml"
-_MONITORING_COMPOSE = """\
-services:
+_PROMETHEUS_CONFIG = """global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+"""
+
+_MONITORING_COMPOSE = """services:
   prometheus:
     image: prom/prometheus:latest
     container_name: ude_prometheus
@@ -57,6 +71,7 @@ services:
       - '--storage.tsdb.retention.time=7d'
     volumes:
       - ude_prometheus_data:/prometheus
+      - /home/taiwohassan/.ude/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     restart: unless-stopped
 
   pushgateway:
@@ -88,6 +103,23 @@ volumes:
 """
 
 # Grafana API credentials
+_PROMETHEUS_CONFIG_PATH = Path.home() / ".ude" / "prometheus.yml"
+_PROMETHEUS_CONFIG = """\
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+"""
+
 _GRAFANA_URL  = "http://localhost:3000"
 _GRAFANA_AUTH = ("admin", "admin")
 
@@ -603,7 +635,12 @@ def _start_monitoring() -> None:
         return
 
     _MONITORING_COMPOSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _PROMETHEUS_CONFIG_PATH.write_text(_PROMETHEUS_CONFIG)
     _MONITORING_COMPOSE_PATH.write_text(_MONITORING_COMPOSE)
+
+    # Write prometheus.yml config so it scrapes Pushgateway
+    prometheus_config_path = _MONITORING_COMPOSE_PATH.parent / "prometheus.yml"
+    prometheus_config_path.write_text(_PROMETHEUS_CONFIG)
 
     result = subprocess.run(
         ["docker", "compose", "-f", str(_MONITORING_COMPOSE_PATH), "up", "-d"],
