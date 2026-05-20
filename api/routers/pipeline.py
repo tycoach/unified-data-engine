@@ -403,3 +403,85 @@ def seed_pipeline(
 
     raise HTTPException(status_code=400,
                         detail=f"Seed not configured for pipeline '{pipeline_id}'")
+
+# ── POST /pipeline/{pipeline_id}/ingest ───────────────────────────────────────
+
+class IngestRequest(BaseModel):
+    records: list[dict]
+    batch_hint: Optional[str] = None  # optional caller-supplied label
+
+
+@router.post("/{pipeline_id}/ingest")
+def ingest_records(
+    pipeline_id: str,
+    request: IngestRequest,
+    x_ude_project: Optional[str] = Header(None, alias="X-UDE-Project"),
+):
+    """
+    Push records directly into a pipeline without needing a Pub/Sub client.
+    The engine publishes each record to the pipeline's Pub/Sub topic and
+    picks it up on the next 30-second batch cycle.
+
+    This is the primary integration path for real applications:
+        POST /pipeline/events/ingest
+        {"records": [{"user_id": "u1", "event": "click", ...}]}
+
+    The caller only needs HTTP — no Pub/Sub SDK, no topic management.
+    """
+    import json
+    import base64
+    import urllib.request
+
+    token       = _token(x_ude_project)
+    pipeline    = _assert_exists(pipeline_id, token)
+
+    if not request.records:
+        raise HTTPException(status_code=400, detail="records list is empty")
+
+    if len(request.records) > 10_000:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum 10,000 records per ingest call"
+        )
+
+    # Resolve topic from pipeline config
+    cfg         = get_pipeline(pipeline_id, project_token=token) or {}
+    kafka_topic = cfg.get("kafka_topic") or cfg.get("topic") or f"raw.{pipeline_id}"
+    project_id  = "local-dev-project"
+    minisky_url = "http://localhost:8080"
+
+    url = f"{minisky_url}/v1/projects/{project_id}/topics/{kafka_topic}:publish"
+
+    # Encode records as Pub/Sub messages
+    messages = [
+        {"data": base64.b64encode(json.dumps(r).encode()).decode()}
+        for r in request.records
+    ]
+
+    payload = json.dumps({"messages": messages}).encode()
+    req     = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result      = json.loads(resp.read())
+            message_ids = result.get("messageIds", [])
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to publish to Pub/Sub topic '{kafka_topic}': {e}"
+        )
+
+    return {
+        "pipeline_id":       pipeline_id,
+        "topic":             kafka_topic,
+        "records_published": len(request.records),
+        "message_ids":       message_ids[:5],  # first 5 for traceability
+        "batch_hint":        request.batch_hint,
+        "status":            "published",
+        "note":              "Records will be processed on the next 30s engine cycle.",
+    }
