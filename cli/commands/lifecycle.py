@@ -9,18 +9,18 @@ Correct startup sequence with readiness checks at every step:
   3. dbt deps (skipped if packages already installed)
   4. FastAPI (wait for /health)
   5. Streamlit UI (background)
-  6. Monitoring stack (Prometheus + Pushgateway + Grafana via Docker)
-
-One command. No make. No separate provision. No separate observe start.
+  6. Monitoring stack + provision Prometheus datasource + import dashboards
 """
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -39,7 +39,6 @@ from cli.output.console import console, print_error, print_info, print_success, 
 
 app = typer.Typer(help="Stack lifecycle — up, down, status, seed, init")
 
-# Monitoring compose file — written to ~/.ude/ so it works for pip users
 _MONITORING_COMPOSE_PATH = Path.home() / ".ude" / "monitoring-compose.yml"
 _MONITORING_COMPOSE = """\
 services:
@@ -85,6 +84,10 @@ volumes:
   ude_grafana_data:
 """
 
+# Grafana API credentials
+_GRAFANA_URL  = "http://localhost:3000"
+_GRAFANA_AUTH = ("admin", "admin")
+
 
 def _ctx(ctx: typer.Context) -> UDEContext:
     return ctx.obj
@@ -97,13 +100,13 @@ def up(ctx: typer.Context) -> None:
     """
     Start the full UDE stack — one command, no make required.
 
-    Sequence (with readiness checks):
+    Sequence:
       1. MiniSky       — local GCP emulator
       2. Provisioning  — Pub/Sub topics for all registered pipelines
       3. dbt deps      — skipped if packages already installed
       4. FastAPI        — control plane API
       5. Streamlit UI  — operator dashboard
-      6. Monitoring    — Prometheus + Pushgateway + Grafana
+      6. Monitoring    — Prometheus + Grafana + pre-loaded dashboards
     """
     ude_ctx = _ctx(ctx)
     cfg     = ude_ctx.config
@@ -165,9 +168,10 @@ def up(ctx: typer.Context) -> None:
             print_warning("Streamlit slow to start — check with: ude status")
 
     # ── Step 6: Monitoring stack ──────────────────────────────────────────────
-    _step(6, 6, "Monitoring", "Prometheus + Pushgateway + Grafana")
+    _step(6, 6, "Monitoring", "Prometheus + Pushgateway + Grafana + dashboards")
     if _port_open(9090) and _port_open(3000):
-        print_success("Monitoring already running (Grafana at :3000)")
+        print_success("Monitoring already running — verifying dashboards...")
+        _provision_grafana()
     else:
         _start_monitoring()
 
@@ -197,31 +201,11 @@ def down(ctx: typer.Context) -> None:
 
     stopped = []
 
-    # Stop engine
-    r = subprocess.run(
-        ["pkill", "-f", "engine/main.py"],
-        capture_output=True,
-    )
-    if r.returncode == 0:
-        stopped.append("engine")
+    for pattern in ["engine/main.py", "uvicorn api.main", "streamlit run"]:
+        r = subprocess.run(["pkill", "-f", pattern], capture_output=True)
+        if r.returncode == 0:
+            stopped.append(pattern.split()[0])
 
-    # Stop API
-    r = subprocess.run(
-        ["pkill", "-f", "uvicorn api.main"],
-        capture_output=True,
-    )
-    if r.returncode == 0:
-        stopped.append("API")
-
-    # Stop Streamlit
-    r = subprocess.run(
-        ["pkill", "-f", "streamlit run"],
-        capture_output=True,
-    )
-    if r.returncode == 0:
-        stopped.append("Streamlit")
-
-    # Stop monitoring
     if _MONITORING_COMPOSE_PATH.exists():
         subprocess.run(
             ["docker", "compose", "-f", str(_MONITORING_COMPOSE_PATH), "down"],
@@ -233,7 +217,6 @@ def down(ctx: typer.Context) -> None:
         print_success(f"Stopped: {', '.join(stopped)}")
     else:
         print_info("Nothing was running.")
-
     console.print()
 
 
@@ -244,7 +227,6 @@ def status(ctx: typer.Context) -> None:
     """Show health of every component."""
     ude_ctx = _ctx(ctx)
     cfg     = ude_ctx.config
-
     import shutil
 
     rows = [
@@ -295,7 +277,7 @@ def seed(
     ctx: typer.Context,
     scenario: Optional[str] = typer.Option(
         None, "--scenario", "-s",
-        help="Scenario to seed (e.g. happy_path, products). Defaults to all."
+        help="Scenario to seed. Defaults to all."
     ),
 ) -> None:
     """Publish synthetic test data to Pub/Sub."""
@@ -322,12 +304,7 @@ def seed(
 
 @app.command()
 def init(ctx: typer.Context) -> None:
-    """
-    Scaffold a new UDE project and generate a project token.
-
-    The project token scopes all your pipelines — only your pipelines
-    are visible when you run ude pipeline list.
-    """
+    """Scaffold a new UDE project and generate a project token."""
     from cli.scaffold.project import scaffold_project
     from cli.core.config import (
         generate_token, write_config,
@@ -351,11 +328,11 @@ def init(ctx: typer.Context) -> None:
     console.print()
 
     project_name = typer.prompt("Project name", default=cwd.name)
-    env          = typer.prompt(
+    env = typer.prompt(
         "Environment", default="local",
         type=typer.Choice(["local", "staging", "production"]),
     )
-    gcp_project  = typer.prompt(
+    gcp_project = typer.prompt(
         "GCP project ID (leave blank for MiniSky local dev)", default=""
     )
 
@@ -386,7 +363,7 @@ def init(ctx: typer.Context) -> None:
     console.print(Panel(
         f"[bold]Project token:[/bold] [info]{token}[/info]\n\n"
         f"[muted]Saved to ~/.ude/config.yml\n"
-        f"Share this token with teammates who need access to the same project.\n"
+        f"Share with teammates who need access to this project.\n"
         f"Set via env var: [bold]UDE_PROJECT_TOKEN={token}[/bold][/muted]",
         title="[bold]Project Identity[/bold]",
         border_style="cyan",
@@ -400,7 +377,6 @@ def init(ctx: typer.Context) -> None:
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _step(n: int, total: int, name: str, description: str) -> None:
-    """Print a step header."""
     console.print(
         f"  [muted][{n}/{total}][/muted] [bold]{name}[/bold]"
         f" [muted]— {description}[/muted]"
@@ -408,19 +384,12 @@ def _step(n: int, total: int, name: str, description: str) -> None:
 
 
 def _port_open(port: int) -> bool:
-    """Check if something is listening on localhost:port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
         return s.connect_ex(("localhost", port)) == 0
 
 
-def _wait_for_port(
-    port: int,
-    timeout: int = 20,
-    label: str = "",
-    interval: float = 1.0,
-) -> bool:
-    """Poll until port is open or timeout expires."""
+def _wait_for_port(port: int, timeout: int = 20, label: str = "", interval: float = 1.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _port_open(port):
@@ -430,13 +399,7 @@ def _wait_for_port(
     return False
 
 
-def _wait_for_url(
-    url: str,
-    timeout: int = 15,
-    label: str = "",
-    interval: float = 1.0,
-) -> bool:
-    """Poll URL until it returns 2xx or timeout expires."""
+def _wait_for_url(url: str, timeout: int = 15, label: str = "", interval: float = 1.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -451,43 +414,22 @@ def _wait_for_url(
 
 
 def _bg(cmd: str) -> None:
-    """Run a shell command in the background."""
-    subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _provision(cfg) -> None:
-    """
-    Provision Pub/Sub topics and BigQuery datasets on MiniSky.
-
-    Reads ALL registered pipelines — filesystem AND every API-registered
-    pipeline across all project tokens — and creates topics/subscriptions.
-    Idempotent — safe to run on every startup.
-    """
-    import urllib.request
-    import json
+    """Provision Pub/Sub topics + BigQuery datasets for all registered pipelines."""
     import logging as _logging
 
     minisky = cfg.minisky_url
     project = "local-dev-project"
 
-    # Suppress INFO logs from loader and bigtable during this step
     for _log_name in ("config.loader", "engine.state.bigtable_client"):
         _logging.getLogger(_log_name).setLevel(_logging.WARNING)
 
-    # Collect pipelines from ALL sources:
-    #   1. Filesystem (config/pipelines/*.yml)
-    #   2. ALL Bigtable keys — across every project token
-    #      (load_pipelines() with a token only returns that token's pipelines,
-    #       so we scan Bigtable directly to get everything)
     pipelines = []
     seen_ids  = set()
 
-    # Filesystem pipelines
     try:
         from config.loader import _load_from_filesystem
         for p in _load_from_filesystem():
@@ -498,7 +440,6 @@ def _provision(cfg) -> None:
     except Exception:
         pass
 
-    # All Bigtable pipeline_config# keys — regardless of token namespace
     try:
         from engine.state.bigtable_client import BigtableClient
         client   = BigtableClient()
@@ -516,60 +457,44 @@ def _provision(cfg) -> None:
     except Exception:
         pass
 
-    # Restore log levels
     for _log_name in ("config.loader", "engine.state.bigtable_client"):
         _logging.getLogger(_log_name).setLevel(_logging.INFO)
 
-    # Always create the standard BigQuery datasets
     datasets = ["raw_staging", "snapshots", "marts", "quarantine"]
     for ds in datasets:
         try:
             body = json.dumps({
-                "datasetReference": {
-                    "datasetId": ds,
-                    "projectId": project,
-                }
+                "datasetReference": {"datasetId": ds, "projectId": project}
             }).encode()
             req = urllib.request.Request(
                 f"{minisky}/bigquery/v2/projects/{project}/datasets",
-                data=body,
-                method="POST",
+                data=body, method="POST",
                 headers={"Content-Type": "application/json"},
             )
             urllib.request.urlopen(req, timeout=5)
         except Exception:
-            pass  # already exists or not critical
+            pass
 
-    # Create topics and subscriptions for each pipeline
     created_topics = []
     created_subs   = []
 
     for pipeline in pipelines:
         pid = pipeline.get("pipeline_id", "")
         sub = pipeline.get("subscription_id", f"raw.{pid}-sub")
-
-        # Derive topic from subscription (raw.customers-sub → raw.customers)
         topic = sub.replace("-sub", "")
 
-        # Create topic
         try:
             req = urllib.request.Request(
                 f"{minisky}/v1/projects/{project}/topics/{topic}",
-                data=b"{}",
-                method="PUT",
+                data=b"{}", method="PUT",
                 headers={"Content-Type": "application/json"},
             )
             urllib.request.urlopen(req, timeout=5)
             created_topics.append(topic)
         except Exception as e:
-            # 409 = already exists — count as success (idempotent)
             if "409" in str(e) or "Conflict" in str(e):
                 created_topics.append(topic)
-            else:
-                import sys
-                print(f"    [warn] topic {topic}: {e}", file=sys.stderr)
 
-        # Create subscription
         try:
             body = json.dumps({
                 "topic": f"projects/{project}/topics/{topic}",
@@ -577,39 +502,26 @@ def _provision(cfg) -> None:
             }).encode()
             req = urllib.request.Request(
                 f"{minisky}/v1/projects/{project}/subscriptions/{sub}",
-                data=body,
-                method="PUT",
+                data=body, method="PUT",
                 headers={"Content-Type": "application/json"},
             )
             urllib.request.urlopen(req, timeout=5)
             created_subs.append(sub)
         except Exception as e:
-            # 409 = already exists — count as success (idempotent)
             if "409" in str(e) or "Conflict" in str(e):
                 created_subs.append(sub)
-            else:
-                import sys
-                print(f"    [warn] subscription {sub}: {e}", file=sys.stderr)
 
-    n_topics = len(created_topics)
-    n_subs   = len(created_subs)
-    n_ds     = len(datasets)
-    n_total  = len(pipelines)
-
+    n_total = len(pipelines)
     print_success(
-        f"Verified {n_topics}/{n_total} topic(s) · "
-        f"{n_subs}/{n_total} subscription(s) · "
-        f"{n_ds} datasets ready"
+        f"Verified {len(created_topics)}/{n_total} topic(s) · "
+        f"{len(created_subs)}/{n_total} subscription(s) · "
+        f"{len(datasets)} datasets ready"
     )
 
 
 def _ensure_dbt_deps() -> None:
-    """
-    Install dbt packages — skip if dbt_packages/ already exists and is populated.
-    Prevents blocking on network failures at startup.
-    """
+    """Install dbt packages — skip if already installed."""
     packages_dir = Path("dbt/dbt_packages")
-
     if packages_dir.exists() and any(packages_dir.iterdir()):
         print_success("dbt packages already installed — skipping")
         return
@@ -617,44 +529,30 @@ def _ensure_dbt_deps() -> None:
     print_info("Installing dbt packages...")
     result = subprocess.run(
         ["dbt", "deps", "--project-dir", "dbt", "--profiles-dir", "dbt", "--quiet"],
-        capture_output=True,
-        text=True,
-        timeout=60,
+        capture_output=True, text=True, timeout=60,
     )
     if result.returncode == 0:
         print_success("dbt packages installed")
     else:
-        print_warning(
-            "dbt deps failed (network issue?) — continuing without packages. "
-            "Run: ude dbt run to retry."
-        )
+        print_warning("dbt deps failed (network issue?) — continuing. Run: ude dbt run to retry.")
 
 
 def _start_api() -> None:
-    """Start FastAPI in the background."""
     python = sys.executable
     subprocess.Popen(
-        [
-            python, "-m", "uvicorn",
-            "api.main:app",
-            "--host", "0.0.0.0",
-            "--port", "8000",
-            "--log-level", "warning",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        [python, "-m", "uvicorn", "api.main:app",
+         "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         cwd=str(Path.cwd()),
     )
 
 
 def _start_streamlit() -> None:
-    """Start Streamlit in the background."""
-    python = sys.executable
-    env = os.environ.copy()
+    python    = sys.executable
+    env       = os.environ.copy()
     env["PYTHONPATH"] = str(Path.cwd())
-
-    # Find streamlit — prefer venv binary
     streamlit = Path(python).parent / "streamlit"
+
     if not streamlit.exists():
         import shutil
         found = shutil.which("streamlit")
@@ -669,27 +567,17 @@ def _start_streamlit() -> None:
         return
 
     subprocess.Popen(
-        [
-            str(streamlit), "run", str(ui_path),
-            "--server.port", "8501",
-            "--server.address", "0.0.0.0",
-            "--server.headless", "true",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        cwd=str(Path.cwd()),
+        [str(streamlit), "run", str(ui_path),
+         "--server.port", "8501", "--server.address", "0.0.0.0",
+         "--server.headless", "true"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env, cwd=str(Path.cwd()),
     )
 
 
 def _start_monitoring() -> None:
-    """Start Prometheus + Pushgateway + Grafana via Docker compose."""
-    # Check Docker is available
-    result = subprocess.run(
-        ["docker", "info"],
-        capture_output=True,
-        timeout=5,
-    )
+    """Start monitoring stack and provision Grafana datasource + dashboards."""
+    result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
     if result.returncode != 0:
         print_warning("Docker not available — skipping monitoring stack")
         print_info("Install Docker Desktop and run: ude observe start")
@@ -700,17 +588,125 @@ def _start_monitoring() -> None:
 
     result = subprocess.run(
         ["docker", "compose", "-f", str(_MONITORING_COMPOSE_PATH), "up", "-d"],
-        capture_output=True,
-        text=True,
-        timeout=60,
+        capture_output=True, text=True, timeout=60,
     )
 
-    if result.returncode == 0:
-        # Wait for Grafana
-        ok = _wait_for_port(3000, timeout=15, label="Grafana")
-        if ok:
-            print_success("Monitoring ready — Grafana at http://localhost:3000")
-        else:
-            print_warning("Monitoring starting slowly — check with: ude status")
-    else:
+    if result.returncode != 0:
         print_warning("Monitoring stack failed to start — run: ude observe start")
+        return
+
+    ok = _wait_for_port(3000, timeout=20, label="Grafana")
+    if not ok:
+        print_warning("Grafana slow to start — dashboards will load on next ude up")
+        return
+
+    # Small extra wait for Grafana API to be fully ready
+    time.sleep(2)
+    _provision_grafana()
+
+
+def _provision_grafana() -> None:
+    """
+    Provision Prometheus datasource and import UDE dashboards into Grafana.
+
+    Dashboards are bundled as package data in cli/data/dashboards/.
+    Works for pip installs — no engine filesystem access required.
+    """
+    import importlib.resources as pkg_resources
+
+    grafana_url  = _GRAFANA_URL
+    auth         = _GRAFANA_AUTH
+
+    # ── 1. Add Prometheus datasource ─────────────────────────────────────────
+    datasource = {
+        "name":      "Prometheus",
+        "type":      "prometheus",
+        "url":       "http://host.docker.internal:9090",
+        "access":    "proxy",
+        "isDefault": True,
+    }
+
+    try:
+        req = urllib.request.Request(
+            f"{grafana_url}/api/datasources",
+            data=json.dumps(datasource).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        import base64
+        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+        req.add_header("Authorization", f"Basic {token}")
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        # 409 = datasource already exists — that's fine
+        if "409" not in str(e) and "already exists" not in str(e).lower():
+            print_warning(f"Could not add Prometheus datasource: {e}")
+
+    # ── 2. Import dashboards from package data ────────────────────────────────
+    dashboard_files = _get_bundled_dashboards()
+    imported = 0
+
+    for name, dashboard_json in dashboard_files.items():
+        try:
+            payload = {
+                "dashboard": dashboard_json,
+                "overwrite": True,
+                "folderId":  0,
+            }
+            req = urllib.request.Request(
+                f"{grafana_url}/api/dashboards/import",
+                data=json.dumps(payload).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            req.add_header("Authorization", f"Basic {token}")
+            urllib.request.urlopen(req, timeout=5)
+            imported += 1
+        except Exception as e:
+            print_warning(f"Could not import dashboard '{name}': {e}")
+
+    if imported > 0:
+        print_success(
+            f"Grafana ready — {imported} dashboard(s) imported · "
+            f"http://localhost:3000  [muted](admin / admin)[/muted]"
+        )
+    else:
+        print_success("Grafana ready at http://localhost:3000  (admin / admin)")
+
+
+def _get_bundled_dashboards() -> dict[str, dict]:
+    """
+    Load dashboard JSON files bundled with the CLI package.
+
+    Files are stored in cli/data/dashboards/ and included in the
+    wheel via pyproject.toml include pattern.
+
+    Falls back to monitoring/grafana/dashboards/ if running from
+    the engine repo (contributors / self-hosted).
+    """
+    dashboards = {}
+
+    # Try package data first (pip install path)
+    try:
+        import importlib.resources as pkg_resources
+        
+        pkg = pkg_resources.files("cli") / "data" / "dashboards"
+        for resource in pkg.iterdir():
+            if resource.name.endswith(".json"):
+                content = json.loads(resource.read_text())
+                dashboards[resource.name] = content
+        if dashboards:
+            return dashboards
+    except Exception:
+        pass
+
+    # Fallback to engine repo path (contributors)
+    repo_path = Path("monitoring/grafana/dashboards")
+    if repo_path.exists():
+        for f in repo_path.glob("*.json"):
+            try:
+                dashboards[f.name] = json.loads(f.read_text())
+            except Exception:
+                pass
+
+    return dashboards

@@ -21,8 +21,6 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-
-# Core deps — always installed with pip install unified-data-engine
 dependencies = [
     "typer>=0.12.0",
     "rich>=13.7.0",
@@ -33,35 +31,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# pip install unified-data-engine[gcp]
-# Needed for commands that talk directly to GCP (not via the FastAPI stack)
 gcp = [
     "google-cloud-pubsub>=2.21.0",
     "google-cloud-bigquery>=3.20.0",
     "google-cloud-bigtable>=2.23.0",
 ]
-
-# pip install unified-data-engine[dev]
-# Everything needed to develop and test the CLI
 dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",
     "pytest-httpx>=0.30.0",
     "ruff>=0.4.0",
-    # mypy and pre-commit intentionally excluded from dev extras —
-    # they pull in pathspec>=1.0 which conflicts with dbt-core's
-    # pathspec<0.13 requirement. Install separately if needed:
-    #   pip install mypy pre-commit --constraint constraints.txt
 ]
-
-# pip install unified-data-engine[all]
 all = [
     "unified-data-engine[gcp]",
     "unified-data-engine[dev]",
 ]
 
 [project.scripts]
-# This is what makes `ude` work after pip install
 ude = "cli.main:app"
 
 [project.urls]
@@ -70,9 +56,16 @@ Repository = "https://github.com/tycoach/unified-data-engine"
 Issues = "https://github.com/tycoach/unified-data-engine/issues"
 
 [tool.hatch.build.targets.wheel]
-# Only ship the cli/ package in the wheel
-# Engine, API, UI are not part of the pip-installable CLI
 packages = ["cli"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+# Include dashboard JSON files as package data inside the cli package
+"cli/data" = "cli/data"
+
+[tool.hatch.build.force-include]
+# Explicitly bundle dashboard JSON files
+"cli/data/dashboards/engine_overview.json" = "cli/data/dashboards/engine_overview.json"
+"cli/data/dashboards/dbt_health.json"      = "cli/data/dashboards/dbt_health.json"
 
 [tool.ruff]
 target-version = "py312"
@@ -81,7 +74,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
 
 [tool.ruff.per-file-ignores]
-"tests/*" = ["S101"]  # allow assert in tests
+"tests/*" = ["S101"]
 
 [tool.mypy]
 python_version = "3.12"

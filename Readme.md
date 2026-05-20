@@ -14,7 +14,7 @@ ude up
 
 UDE is a self-contained data processing platform for platform data engineers who need production-grade SCD handling, schema drift detection, and full observability — without the overhead of enterprise-scale tools.
 
-**The core promise:** register a pipeline via `ude pipeline new`, publish data to Pub/Sub, and the engine handles everything else — schema inference, edge case gating, dbt transformations, checkpointing, and metrics.
+**The core promise:** register a pipeline via `ude pipeline new`, publish data to Pub/Sub (or POST directly to the API), and the engine handles everything else — schema inference, edge case gating, dbt transformations, checkpointing, and metrics.
 
 ### What happens on every 30-second batch cycle:
 
@@ -297,8 +297,87 @@ ude pipeline new
 # 6. Confirm it's registered
 ude pipeline list
 
-# 7. Watch it process
+# 7. Push data — no Pub/Sub client needed
+curl -X POST http://<engine-host>:8000/pipeline/events/ingest \
+  -H "X-UDE-Project: proj_acme-analytics-a3f9b2" \
+  -H "Content-Type: application/json" \
+  -d '{"records": [{"event_id": "e1", "user_id": "u1", ...}]}'
+
+# 8. Watch it process
 ude observe watch
+```
+
+---
+
+## Sending Data — Two Paths
+
+### Path A — Direct HTTP ingest (no Pub/Sub client needed)
+
+Any application can push records directly to the engine with a single HTTP POST.
+No Pub/Sub SDK. No topic management. No configuration on the caller's side.
+
+```bash
+POST /pipeline/{pipeline_id}/ingest
+Headers: X-UDE-Project: <your-token>
+Body:    {"records": [...], "batch_hint": "optional-label"}
+```
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/pipeline/events/ingest \
+  -H "Content-Type: application/json" \
+  -H "X-UDE-Project: proj_acme-analytics-a3f9b2" \
+  -d '{
+    "records": [
+      {"event_id": "e1", "user_id": "u1", "event_type": "click", "created_at": "2026-05-20T12:00:00"},
+      {"event_id": "e2", "user_id": "u2", "event_type": "view",  "created_at": "2026-05-20T12:00:01"}
+    ],
+    "batch_hint": "my-app-v1"
+  }'
+```
+
+Response:
+
+```json
+{
+  "pipeline_id": "events",
+  "topic": "raw.events",
+  "records_published": 2,
+  "message_ids": ["1", "2"],
+  "status": "published",
+  "note": "Records will be processed on the next 30s engine cycle."
+}
+```
+
+Supports up to **10,000 records per call**. Records are picked up by the engine on the next 30-second cycle.
+
+From Python:
+
+```python
+import requests
+
+requests.post(
+    "http://your-engine-host:8000/pipeline/events/ingest",
+    headers={"X-UDE-Project": "proj_acme-analytics-a3f9b2"},
+    json={"records": your_records}
+)
+```
+
+### Path B — Pub/Sub publish (existing pipelines)
+
+Publish directly to the pipeline's Pub/Sub topic if you already have a Pub/Sub client:
+
+```python
+import base64, json, urllib.request
+
+records = [{"event_id": "e1", ...}]
+messages = [{"data": base64.b64encode(json.dumps(r).encode()).decode()} for r in records]
+urllib.request.urlopen(urllib.request.Request(
+    "http://localhost:8080/v1/projects/local-dev-project/topics/raw.events:publish",
+    data=json.dumps({"messages": messages}).encode(),
+    headers={"Content-Type": "application/json"},
+))
 ```
 
 ---
@@ -407,7 +486,7 @@ FastAPI at `http://localhost:8000/docs` — 20+ endpoints across 6 routers.
 | Router | Key endpoints |
 |---|---|
 | `/health` | Stack health, MiniSky connectivity |
-| `/pipeline` | List, inspect, register, enable/disable, batch history |
+| `/pipeline` | List, inspect, register, enable/disable, ingest, batch history |
 | `/schema` | Show, history, diff, sync, approve migration |
 | `/quarantine` | List batches, inspect, approve, reject, replay |
 | `/dbt` | Trigger runs, status, lineage, artifacts |
@@ -535,6 +614,7 @@ No engine code changes needed:
 | Operator commands require SSH + curl | `ude quarantine approve`, `ude schema diff` from anywhere |
 | 3rd party users can see internal pipelines | Project token scoping — full multi-tenant isolation |
 | Startup requires 6 separate commands | `ude up` — one command, all 6 components |
+| Getting data in requires a Pub/Sub client | `POST /pipeline/{id}/ingest` — plain HTTP, no SDK needed |
 | Vendor lock-in to expensive platforms | 100% open source, GCP-native, MiniSky for local dev |
 
 ---
@@ -543,7 +623,8 @@ No engine code changes needed:
 
 | Version | PyPI | What shipped |
 |---|---|---|
-| `2.6.0` | ✓ latest | `ude up` one-command startup, auto-provision, monitoring included |
+| `2.6.0` | ✓ latest | `POST /pipeline/{id}/ingest` — direct HTTP data ingestion |
+| `2.5.0` | — | `ude up` one-command startup, auto-provision, monitoring included |
 | `1.6.0` | — | `ude up` full stack — no make required |
 | `1.5.0` | — | Engine hot-reload + `ude observe start/stop` |
 | `1.4.0` | — | Project token scoping — multi-tenant pipeline isolation |
