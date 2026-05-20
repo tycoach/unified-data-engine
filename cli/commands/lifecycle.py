@@ -25,7 +25,10 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import logging
 import typer
+
+logging.getLogger('httpx').setLevel(logging.WARNING)
 from rich.panel import Panel
 from rich.table import Table
 
@@ -142,8 +145,8 @@ def up(ctx: typer.Context) -> None:
     # ── Step 4: FastAPI ───────────────────────────────────────────────────────
     _step(4, 6, "FastAPI", "control plane API")
     if _port_open(8000):
-        print_success("API already running at :8000")
-    else:
+        print_success(f"API already running at {cfg.api_base_url}")
+    elif _is_engine_owner():
         _start_api()
         ok = _wait_for_url(
             f"{cfg.api_base_url}/health",
@@ -154,18 +157,25 @@ def up(ctx: typer.Context) -> None:
             print_error("FastAPI failed to start.")
             raise typer.Exit(code=1)
         print_success(f"API ready at {cfg.api_base_url}/docs")
+    else:
+        print_warning(
+            f"API not running at {cfg.api_base_url} — "
+            "ask the engine owner to start it, or set host/port in ~/.ude/config.yml"
+        )
 
     # ── Step 5: Streamlit UI ──────────────────────────────────────────────────
     _step(5, 6, "Streamlit UI", "operator dashboard")
     if _port_open(8501):
         print_success("Streamlit already running at :8501")
-    else:
+    elif _is_engine_owner():
         _start_streamlit()
         ok = _wait_for_port(8501, timeout=15, label="Streamlit")
         if ok:
             print_success("Streamlit ready at http://localhost:8501")
         else:
             print_warning("Streamlit slow to start — check with: ude status")
+    else:
+        print_info("Streamlit UI runs on the engine host — skipping")
 
     # ── Step 6: Monitoring stack ──────────────────────────────────────────────
     _step(6, 6, "Monitoring", "Prometheus + Pushgateway + Grafana + dashboards")
@@ -375,6 +385,15 @@ def init(ctx: typer.Context) -> None:
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+def _is_engine_owner() -> bool:
+    """
+    True if running from the engine repo (has api/ and engine/ directories).
+    False for 3rd party pip users who only have the CLI installed.
+    """
+    cwd = Path.cwd()
+    return (cwd / "api" / "main.py").exists() and (cwd / "engine" / "main.py").exists()
+
 
 def _step(n: int, total: int, name: str, description: str) -> None:
     console.print(
@@ -595,13 +614,17 @@ def _start_monitoring() -> None:
         print_warning("Monitoring stack failed to start — run: ude observe start")
         return
 
-    ok = _wait_for_port(3000, timeout=20, label="Grafana")
+    ok = _wait_for_url(
+        f"{_GRAFANA_URL}/api/health",
+        timeout=30,
+        label="Grafana API",
+    )
     if not ok:
         print_warning("Grafana slow to start — dashboards will load on next ude up")
         return
 
-    # Small extra wait for Grafana API to be fully ready
-    time.sleep(2)
+    # Extra wait for Grafana to finish initialising after health check passes
+    time.sleep(3)
     _provision_grafana()
 
 
@@ -616,6 +639,12 @@ def _provision_grafana() -> None:
 
     grafana_url  = _GRAFANA_URL
     auth         = _GRAFANA_AUTH
+
+    # Wait for Grafana API to be fully ready before provisioning
+    ok = _wait_for_url(f"{grafana_url}/api/health", timeout=15, label="Grafana API")
+    if not ok:
+        print_warning("Grafana API not ready — skipping dashboard provisioning")
+        return
 
     # ── 1. Add Prometheus datasource ─────────────────────────────────────────
     datasource = {
