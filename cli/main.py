@@ -1,18 +1,6 @@
+# cli/main.py
 """
 ude — Unified Data Engine CLI
-
-Entry point registered in pyproject.toml:
-    [project.scripts]
-    ude = "cli.main:app"
-
-Usage:
-    ude --help
-    ude up
-    ude pipeline list
-    ude dbt run
-    ude schema sync
-    ude quarantine list
-    ude observe watch
 """
 
 from __future__ import annotations
@@ -24,6 +12,7 @@ import typer
 from rich.panel import Panel
 
 from cli.commands import dbt, lifecycle, observe, pipeline, quarantine, schema
+from cli.commands import auth
 from cli.core.config import load_config
 from cli.core.context import UDEContext
 from cli.core.errors import UDEError
@@ -32,17 +21,18 @@ from cli.output.console import console, err_console, print_error
 app = typer.Typer(
     name="ude",
     help="Unified Data Engine — GCP-native dbt-powered micro-batch pipeline engine.",
-    no_args_is_help=False,       # we handle the no-args case ourselves below
+    no_args_is_help=False,
     rich_markup_mode="rich",
-    pretty_exceptions_enable=False,  # we handle exceptions ourselves
+    pretty_exceptions_enable=False,
     add_completion=True,
 )
 
 # Register command groups
-app.add_typer(lifecycle.app, name="lifecycle", hidden=True)   # top-level aliases added below
+app.add_typer(lifecycle.app, name="lifecycle", hidden=True)
+app.add_typer(auth.app,      name="auth",      help="Authentication — signup, whoami, rotate, revoke")
 app.add_typer(dbt.app,       name="dbt",       help="dbt commands — run, test, snapshot, docs, lineage")
 app.add_typer(pipeline.app,  name="pipeline",  help="Pipeline management — list, inspect, new, enable, disable")
-app.add_typer(schema.app,    name="schema",    help="Schema operations — sync, history, diff, approve")
+app.add_typer(schema.app,    name="schema",    help="Schema operations — show, sync, history, diff, approve")
 app.add_typer(quarantine.app,name="quarantine",help="Quarantine management — list, inspect, approve, reject, replay")
 app.add_typer(observe.app,   name="observe",   help="Observability — start, stop, logs, metrics, watch")
 
@@ -88,43 +78,38 @@ def main(
         from cli import __version__
         typer.echo(f"ude {__version__}")
         raise typer.Exit()
+
     cfg = load_config(host=host, port=port)
     ctx.ensure_object(dict)
     ctx.obj = UDEContext(config=cfg, verbose=verbose, output_json=json_output)
 
-    # If no subcommand — show the welcome panel
     if ctx.invoked_subcommand is None:
         _show_welcome(cfg)
 
 
 # ── Lifecycle aliases at the top level ───────────────────────────────────────
-# These let users type `ude up` instead of `ude lifecycle up`
 
-@app.command(name="up", help="Start the UDE stack (engine + API + UI + monitoring)")
+@app.command(name="up",     help="Start the UDE stack")
 def cmd_up(ctx: typer.Context) -> None:
     from cli.commands.lifecycle import up
     up(ctx)
 
-
-@app.command(name="down", help="Stop the UDE stack")
+@app.command(name="down",   help="Stop the UDE stack")
 def cmd_down(ctx: typer.Context) -> None:
     from cli.commands.lifecycle import down
     down(ctx)
 
-
-@app.command(name="status", help="Show stack health — engine, MiniSky, API, dbt")
+@app.command(name="status", help="Show stack health")
 def cmd_status(ctx: typer.Context) -> None:
     from cli.commands.lifecycle import status
     status(ctx)
 
-
-@app.command(name="seed", help="Publish synthetic test data to Pub/Sub")
+@app.command(name="seed",   help="Publish synthetic test data to Pub/Sub")
 def cmd_seed(ctx: typer.Context) -> None:
     from cli.commands.lifecycle import seed
     seed(ctx)
 
-
-@app.command(name="init", help="Scaffold a new UDE project in the current directory")
+@app.command(name="init",   help="Scaffold a new UDE project")
 def cmd_init(ctx: typer.Context) -> None:
     from cli.commands.lifecycle import init
     init(ctx)
@@ -133,11 +118,6 @@ def cmd_init(ctx: typer.Context) -> None:
 # ── Error handler ─────────────────────────────────────────────────────────────
 
 def _run() -> None:
-    """
-    Wraps app() with a top-level error handler.
-    UDEError subclasses render as clean Rich panels.
-    Everything else is re-raised (real bugs should still show tracebacks in dev).
-    """
     try:
         app()
     except UDEError as exc:
@@ -157,26 +137,24 @@ def _run() -> None:
 
 def _show_welcome(cfg) -> None:
     from cli.core.checks import stack_is_running, minisky_is_alive
-    from cli.output.console import console
     from rich.table import Table
 
-    stack_up = stack_is_running(cfg)
+    stack_up   = stack_is_running(cfg)
     minisky_up = minisky_is_alive(cfg)
 
     status_table = Table.grid(padding=(0, 2))
     status_table.add_column(style="muted")
     status_table.add_column()
 
-    status_table.add_row(
-        "API stack",
-        "[success]running[/success]" if stack_up else "[error]not running[/error]",
-    )
-    status_table.add_row(
-        "MiniSky",
-        "[success]running[/success]" if minisky_up else "[warning]not running[/warning]",
-    )
+    status_table.add_row("API stack",  "[success]running[/success]" if stack_up else "[error]not running[/error]")
+    status_table.add_row("MiniSky",    "[success]running[/success]" if minisky_up else "[warning]not running[/warning]")
     status_table.add_row("Environment", f"[info]{cfg.env}[/info]")
-    status_table.add_row("API", f"[muted]{cfg.api_base_url}[/muted]")
+    status_table.add_row("API",        f"[muted]{cfg.api_base_url}[/muted]")
+
+    if cfg.is_authenticated:
+        status_table.add_row("Auth", f"[success]✓[/success] [muted]{cfg.email or 'authenticated'}[/muted]")
+    else:
+        status_table.add_row("Auth", "[warning]No API key — run: ude auth signup[/warning]")
 
     console.print()
     console.print(Panel(
@@ -190,6 +168,10 @@ def _show_welcome(cfg) -> None:
     if not stack_up:
         console.print()
         console.print("  [muted]Start the stack with:[/muted] [bold]ude up[/bold]")
+
+    if not cfg.is_authenticated:
+        console.print()
+        console.print("  [muted]Get an API key with:[/muted] [bold]ude auth signup[/bold]")
 
     console.print()
 

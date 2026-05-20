@@ -2,16 +2,8 @@
 """
 Base HTTP client for the ude CLI.
 
-All API clients inherit from UDEHttpClient. It handles:
-  - Host/port resolution from UDEConfig
-  - Project token injection via X-UDE-Project header
-  - Consistent timeout behaviour
-  - Retry logic on transient failures (503, 502, connection errors)
-  - Mapping HTTP error responses to typed UDEError subclasses
-  - JSON request/response serialisation
-
-Never import httpx directly in command files — always go through
-a typed client (cli/client/pipeline.py etc.) that inherits from here.
+Sends Authorization: Bearer <api_key> on every authenticated request.
+Signup endpoint is public and skips the auth header.
 """
 
 from __future__ import annotations
@@ -25,8 +17,11 @@ from cli.core.config import UDEConfig
 from cli.core.errors import APIError, StackNotRunningError
 
 _RETRYABLE_STATUSES = {502, 503, 504}
-_MAX_RETRIES   = 3
-_RETRY_BACKOFF = [0.5, 1.0, 2.0]
+_MAX_RETRIES        = 3
+_RETRY_BACKOFF      = [0.5, 1.0, 2.0]
+
+# Routes that don't need Authorization header
+_PUBLIC_PATHS = {"/auth/signup", "/auth/signup/", "/health", "/health/", "/"}
 
 
 class UDEHttpClient:
@@ -53,15 +48,14 @@ class UDEHttpClient:
     # ── Streaming ─────────────────────────────────────────────────────────────
 
     def stream_lines(self, path: str, params: dict | None = None):
-        """Generator yielding decoded lines from a streaming HTTP response."""
+        """Generator yielding decoded lines from a streaming response."""
         url = f"{self._base_url}{path}"
         try:
             with httpx.stream(
-                "GET",
-                url,
+                "GET", url,
                 params=params,
                 timeout=None,
-                headers=self._headers(),
+                headers=self._headers(path),
             ) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
@@ -84,12 +78,11 @@ class UDEHttpClient:
         for attempt, backoff in enumerate(_RETRY_BACKOFF):
             try:
                 resp = httpx.request(
-                    method,
-                    url,
+                    method, url,
                     params=params,
                     json=json,
                     timeout=self._timeout,
-                    headers=self._headers(),
+                    headers=self._headers(path),
                     follow_redirects=True,
                 )
 
@@ -115,15 +108,21 @@ class UDEHttpClient:
 
         raise StackNotRunningError(self._config.host, self._config.port)
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, path: str = "") -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "Accept":       "application/json",
-            "User-Agent":   "ude-cli/2.3.0",
+            "User-Agent":   "ude-cli/2.7.2",
         }
-        # Inject project token on every request — scopes all API operations
+
+        # Inject project token
         if self._config.project_token:
             headers["X-UDE-Project"] = self._config.project_token
+
+        # Inject API key as Bearer token — skip for public routes
+        if self._config.api_key and path not in _PUBLIC_PATHS:
+            headers["Authorization"] = f"Bearer {self._config.api_key}"
+
         return headers
 
 

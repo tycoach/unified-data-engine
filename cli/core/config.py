@@ -4,7 +4,7 @@ Config resolution for the ude CLI.
 
 Priority order (highest to lowest):
   1. --host / --port flags passed at command level
-  2. UDE_HOST / UDE_PORT / UDE_PROJECT_TOKEN environment variables
+  2. UDE_HOST / UDE_PORT / UDE_PROJECT_TOKEN / UDE_API_KEY environment variables
   3. ~/.ude/config.yml
   4. Hardcoded defaults (localhost:8000)
 """
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import secrets
-import string
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,7 +25,6 @@ DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8000
 DEFAULT_ENV  = "local"
 
-# Engine owner token — sees everything including filesystem pipelines
 ENGINE_OWNER_TOKEN = "__engine__"
 
 
@@ -37,8 +35,10 @@ class UDEConfig:
     env:           str  = DEFAULT_ENV
     minisky_url:   str  = "http://localhost:9099"
     timeout:       int  = 30
-    project_token: str  = ""        # scopes API calls to this project
-    project_name:  str  = ""        # human-readable project name
+    project_token: str  = ""
+    project_name:  str  = ""
+    api_key:       str  = ""        # Bearer token for API authentication
+    email:         str  = ""        # account email
     extra:         dict = field(default_factory=dict)
 
     @property
@@ -51,13 +51,16 @@ class UDEConfig:
 
     @property
     def has_project(self) -> bool:
-        """True if a project token is configured."""
         return bool(self.project_token)
 
     @property
     def is_engine_owner(self) -> bool:
-        """True if using the engine owner token (sees all pipelines)."""
         return self.project_token == ENGINE_OWNER_TOKEN
+
+    @property
+    def is_authenticated(self) -> bool:
+        """True if an API key is configured."""
+        return bool(self.api_key)
 
 
 def load_config(
@@ -93,7 +96,12 @@ def load_config(
         os.getenv("UDE_PROJECT_TOKEN")
         or file_cfg.get("project_token", "")
     )
-    resolved_name = file_cfg.get("project_name", "")
+    resolved_api_key = (
+        os.getenv("UDE_API_KEY")
+        or file_cfg.get("api_key", "")
+    )
+    resolved_name  = file_cfg.get("project_name", "")
+    resolved_email = file_cfg.get("email", "")
 
     return UDEConfig(
         host=resolved_host,
@@ -103,6 +111,8 @@ def load_config(
         timeout=resolved_timeout,
         project_token=resolved_token,
         project_name=resolved_name,
+        api_key=resolved_api_key,
+        email=resolved_email,
         extra=file_cfg,
     )
 
@@ -110,22 +120,15 @@ def load_config(
 def generate_token(project_name: str) -> str:
     """
     Generate a project-scoped token.
-
     Format: proj_{slug}-{6 random chars}
-    Example: proj_acme-analytics-a3f9b2
     """
-    # Slugify the project name
     slug = (
         project_name.lower()
         .replace(" ", "-")
         .replace("_", "-")
     )
-    # Keep only alphanumeric and hyphens, max 20 chars
     slug = "".join(c for c in slug if c.isalnum() or c == "-")[:20].strip("-")
-
-    # 6 random hex chars
     suffix = secrets.token_hex(3)
-
     return f"proj_{slug}-{suffix}"
 
 
