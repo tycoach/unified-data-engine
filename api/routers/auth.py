@@ -2,25 +2,26 @@
 """
 Authentication endpoints — self-service API key management.
 
-POST /auth/signup        — create account, get API key
-GET  /auth/me            — show current key info
-POST /auth/key/rotate    — rotate API key
+POST /auth/signup        — create account, get API key (90-day TTL)
+GET  /auth/me            — show current key info + expiry
+POST /auth/key/rotate    — rotate API key (resets TTL)
 DELETE /auth/key         — revoke key
 """
 
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# API key TTL — 90 days by default
+KEY_TTL_DAYS = 90
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
 
 class SignupRequest(BaseModel):
     email:        str
@@ -33,6 +34,7 @@ class SignupResponse(BaseModel):
     project_name:  str
     email:         str
     created_at:    str
+    expires_at:    str
     message:       str
 
 
@@ -43,20 +45,16 @@ def signup(request: SignupRequest):
     """
     Self-service signup — create an account and get an API key.
 
-    No engine owner approval required. The API key scopes all
-    subsequent operations to the caller's project.
-
-    Store the returned api_key securely — it is only shown once.
-    Add it to ~/.ude/config.yml or run: ude auth signup
+    Keys expire after 90 days. Rotate before expiry with:
+      POST /auth/key/rotate  or  ude auth rotate
     """
     from engine.state.bigtable_client import BigtableClient
     from cli.core.config import generate_token
 
     client = BigtableClient()
 
-    # Check if email already has an account
-    existing_keys = _find_keys_by_email(client, request.email)
-    if existing_keys:
+    existing = _find_keys_by_email(client, request.email)
+    if existing:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -65,10 +63,11 @@ def signup(request: SignupRequest):
             ),
         )
 
-    # Generate API key and project token
     api_key       = _generate_api_key()
     project_token = generate_token(request.project_name)
-    created_at    = datetime.now(timezone.utc).isoformat()
+    now           = datetime.now(timezone.utc)
+    expires_at    = (now + timedelta(days=KEY_TTL_DAYS)).isoformat()
+    created_at    = now.isoformat()
 
     record = {
         "api_key":       api_key,
@@ -76,18 +75,22 @@ def signup(request: SignupRequest):
         "project_name":  request.project_name,
         "email":         request.email,
         "created_at":    created_at,
+        "expires_at":    expires_at,
         "last_used_at":  None,
         "active":        True,
     }
 
-    # Store under both api_key# and email# for reverse lookup
     client.set(f"api_key#{api_key}", record)
-    client.set(f"email#{request.email}", {"api_key": api_key, "project_token": project_token})
+    client.set(f"email#{request.email}", {
+        "api_key":       api_key,
+        "project_token": project_token,
+    })
 
     logger.info(
         f"[Auth] New account: {request.email} "
         f"project={project_token[:16]} "
-        f"key={api_key[:12]}..."
+        f"key={api_key[:12]}... "
+        f"expires={expires_at[:10]}"
     )
 
     return SignupResponse(
@@ -96,8 +99,10 @@ def signup(request: SignupRequest):
         project_name=request.project_name,
         email=request.email,
         created_at=created_at,
+        expires_at=expires_at,
         message=(
-            "Account created. Save your API key — it will not be shown again. "
+            f"Account created. Key expires {expires_at[:10]}. "
+            "Save your API key — it will not be shown again. "
             "Add to ~/.ude/config.yml: api_key: " + api_key
         ),
     )
@@ -107,15 +112,30 @@ def signup(request: SignupRequest):
 
 @router.get("/me")
 def whoami(request: Request):
-    """
-    Show the identity associated with the current API key.
-    Requires: Authorization: Bearer <api_key>
-    """
+    """Show identity + key expiry for the current API key."""
+    from engine.state.bigtable_client import BigtableClient
+
+    api_key = request.state.api_key
+    record  = BigtableClient().get(f"api_key#{api_key}") or {}
+
+    expires_at  = record.get("expires_at", "")
+    days_left   = None
+    if expires_at:
+        try:
+            expiry_dt = datetime.fromisoformat(expires_at)
+            days_left = (expiry_dt - datetime.now(timezone.utc)).days
+        except ValueError:
+            pass
+
     return {
         "email":         request.state.email,
         "project_name":  request.state.project_name,
         "project_token": request.state.project_token,
-        "api_key":       request.state.api_key[:12] + "...",  # truncated for safety
+        "api_key":       api_key[:12] + "...",
+        "created_at":    record.get("created_at", ""),
+        "expires_at":    expires_at,
+        "days_until_expiry": days_left,
+        "last_used_at":  record.get("last_used_at", ""),
     }
 
 
@@ -124,56 +144,58 @@ def whoami(request: Request):
 @router.post("/key/rotate")
 def rotate_key(request: Request):
     """
-    Rotate the current API key.
-
-    Invalidates the current key and issues a new one with the same
-    project token. Update ~/.ude/config.yml with the new key.
+    Rotate the current API key — resets the 90-day TTL.
+    Old key is immediately invalidated.
     """
     from engine.state.bigtable_client import BigtableClient
 
-    client    = BigtableClient()
-    old_key   = request.state.api_key
+    client     = BigtableClient()
+    old_key    = request.state.api_key
     old_record = client.get(f"api_key#{old_key}")
 
     if not old_record:
         raise HTTPException(status_code=404, detail="Key record not found.")
 
     # Deactivate old key
-    old_record["active"]      = False
-    old_record["revoked_at"]  = datetime.now(timezone.utc).isoformat()
+    old_record["active"]        = False
+    old_record["revoked_at"]    = datetime.now(timezone.utc).isoformat()
     old_record["revoke_reason"] = "rotated"
     client.set(f"api_key#{old_key}", old_record)
 
-    # Issue new key — same project token and email
+    # Issue new key with fresh TTL
     new_key    = _generate_api_key()
+    now        = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(days=KEY_TTL_DAYS)).isoformat()
+
     new_record = {
         "api_key":       new_key,
         "project_token": old_record["project_token"],
         "project_name":  old_record["project_name"],
         "email":         old_record["email"],
-        "created_at":    datetime.now(timezone.utc).isoformat(),
+        "created_at":    now.isoformat(),
+        "expires_at":    expires_at,
         "last_used_at":  None,
         "active":        True,
         "rotated_from":  old_key[:12] + "...",
     }
     client.set(f"api_key#{new_key}", new_record)
-
-    # Update email index
-    client.set(
-        f"email#{old_record['email']}",
-        {"api_key": new_key, "project_token": old_record["project_token"]},
-    )
+    client.set(f"email#{old_record['email']}", {
+        "api_key":       new_key,
+        "project_token": old_record["project_token"],
+    })
 
     logger.info(
         f"[Auth] Key rotated: {old_record['email']} "
-        f"old={old_key[:12]}... new={new_key[:12]}..."
+        f"old={old_key[:12]}... new={new_key[:12]}... "
+        f"expires={expires_at[:10]}"
     )
 
     return {
-        "api_key":      new_key,
+        "api_key":       new_key,
         "project_token": old_record["project_token"],
-        "rotated_at":   new_record["created_at"],
-        "message":      "Key rotated. Update ~/.ude/config.yml with the new api_key.",
+        "expires_at":    expires_at,
+        "rotated_at":    now.isoformat(),
+        "message":       "Key rotated. Update ~/.ude/config.yml with the new api_key.",
     }
 
 
@@ -181,12 +203,7 @@ def rotate_key(request: Request):
 
 @router.delete("/key")
 def revoke_key(request: Request):
-    """
-    Revoke the current API key permanently.
-
-    All subsequent requests with this key will return 401.
-    Sign up again to get a new key.
-    """
+    """Revoke the current API key permanently."""
     from engine.state.bigtable_client import BigtableClient
 
     client  = BigtableClient()
@@ -196,8 +213,8 @@ def revoke_key(request: Request):
     if not record:
         raise HTTPException(status_code=404, detail="Key record not found.")
 
-    record["active"]       = False
-    record["revoked_at"]   = datetime.now(timezone.utc).isoformat()
+    record["active"]        = False
+    record["revoked_at"]    = datetime.now(timezone.utc).isoformat()
     record["revoke_reason"] = "user_requested"
     client.set(f"api_key#{api_key}", record)
 
@@ -213,17 +230,14 @@ def revoke_key(request: Request):
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _generate_api_key() -> str:
-    """Generate a new API key in format: ude_live_<32 hex chars>"""
     return f"ude_live_{secrets.token_hex(32)}"
 
 
 def _find_keys_by_email(client, email: str) -> Optional[dict]:
-    """Check if an email already has an active account."""
     try:
         record = client.get(f"email#{email}")
         if not record:
             return None
-        # Verify the key is still active
         api_key = record.get("api_key")
         if not api_key:
             return None

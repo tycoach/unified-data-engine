@@ -87,7 +87,7 @@ _MONITORING_COMPOSE = """services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD={grafana_password}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
@@ -427,6 +427,39 @@ def _is_engine_owner() -> bool:
     return (cwd / "api" / "main.py").exists() and (cwd / "engine" / "main.py").exists()
 
 
+def _get_or_create_grafana_password() -> str:
+    """
+    Get or generate the Grafana admin password.
+    Stored in ~/.ude/config.yml as grafana_password.
+    Generated once and reused on subsequent startups.
+    """
+    import yaml
+    cfg_file = Path.home() / ".ude" / "config.yml"
+    cfg      = {}
+
+    if cfg_file.exists():
+        try:
+            with cfg_file.open() as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception:
+            cfg = {}
+
+    if cfg.get("grafana_password"):
+        return cfg["grafana_password"]
+
+    # Generate a new password — 16 chars, alphanumeric
+    import secrets, string
+    alphabet = string.ascii_letters + string.digits
+    password = "".join(secrets.choice(alphabet) for _ in range(16))
+
+    cfg["grafana_password"] = password
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    with cfg_file.open("w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+    return password
+
+
 def _step(n: int, total: int, name: str, description: str) -> None:
     console.print(
         f"  [muted][{n}/{total}][/muted] [bold]{name}[/bold]"
@@ -635,12 +668,14 @@ def _start_monitoring() -> None:
         return
 
     _MONITORING_COMPOSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Write prometheus.yml with Pushgateway scrape config
     _PROMETHEUS_CONFIG_PATH.write_text(_PROMETHEUS_CONFIG)
-    _MONITORING_COMPOSE_PATH.write_text(_MONITORING_COMPOSE)
-
-    # Write prometheus.yml config so it scrapes Pushgateway
-    prometheus_config_path = _MONITORING_COMPOSE_PATH.parent / "prometheus.yml"
-    prometheus_config_path.write_text(_PROMETHEUS_CONFIG)
+    # Inject generated Grafana password into compose
+    grafana_password = _get_or_create_grafana_password()
+    compose_content  = _MONITORING_COMPOSE.replace(
+        "{grafana_password}", grafana_password
+    )
+    _MONITORING_COMPOSE_PATH.write_text(compose_content)
 
     result = subprocess.run(
         ["docker", "compose", "-f", str(_MONITORING_COMPOSE_PATH), "up", "-d"],
@@ -731,13 +766,17 @@ def _provision_grafana() -> None:
         except Exception as e:
             print_warning(f"Could not import dashboard '{name}': {e}")
 
+    grafana_password = _get_or_create_grafana_password()
     if imported > 0:
         print_success(
             f"Grafana ready — {imported} dashboard(s) imported · "
-            f"http://localhost:3000  [muted](admin / admin)[/muted]"
+            f"http://localhost:3000  [muted](admin / {grafana_password})[/muted]"
         )
     else:
-        print_success("Grafana ready at http://localhost:3000  (admin / admin)")
+        print_success(
+            f"Grafana ready at http://localhost:3000  "
+            f"[muted](admin / {grafana_password})[/muted]"
+        )
 
 
 def _get_bundled_dashboards() -> dict[str, dict]:
