@@ -1,11 +1,13 @@
 # api/routers/auth.py
 """
-Authentication endpoints — self-service API key management.
+Authentication endpoints.
 
-POST /auth/signup        — create account, get API key (90-day TTL)
-GET  /auth/me            — show current key info + expiry
-POST /auth/key/rotate    — rotate API key (resets TTL)
-DELETE /auth/key         — revoke key
+POST   /auth/signup        — create account, get API key (90-day TTL)
+GET    /auth/me            — show current key info + expiry
+POST   /auth/key/rotate    — rotate API key (resets TTL)
+DELETE /auth/key           — revoke key
+GET    /auth/keys          — list all accounts (engine owner only)
+GET    /auth/audit         — view audit log entries
 """
 
 import logging
@@ -13,14 +15,14 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# API key TTL — 90 days by default
-KEY_TTL_DAYS = 90
+KEY_TTL_DAYS     = 90
+ENGINE_OWNER_TOK = "__engine__"
 
 
 class SignupRequest(BaseModel):
@@ -42,18 +44,12 @@ class SignupResponse(BaseModel):
 
 @router.post("/signup", response_model=SignupResponse)
 def signup(request: SignupRequest):
-    """
-    Self-service signup — create an account and get an API key.
-
-    Keys expire after 90 days. Rotate before expiry with:
-      POST /auth/key/rotate  or  ude auth rotate
-    """
+    """Self-service signup — returns API key (90-day TTL)."""
     from engine.state.bigtable_client import BigtableClient
     from cli.core.config import generate_token
 
-    client = BigtableClient()
-
-    existing = _find_keys_by_email(client, request.email)
+    client   = BigtableClient()
+    existing = _find_key_by_email(client, request.email)
     if existing:
         raise HTTPException(
             status_code=409,
@@ -103,7 +99,7 @@ def signup(request: SignupRequest):
         message=(
             f"Account created. Key expires {expires_at[:10]}. "
             "Save your API key — it will not be shown again. "
-            "Add to ~/.ude/config.yml: api_key: " + api_key
+            f"Add to ~/.ude/config.yml: api_key: {api_key}"
         ),
     )
 
@@ -118,24 +114,18 @@ def whoami(request: Request):
     api_key = request.state.api_key
     record  = BigtableClient().get(f"api_key#{api_key}") or {}
 
-    expires_at  = record.get("expires_at", "")
-    days_left   = None
-    if expires_at:
-        try:
-            expiry_dt = datetime.fromisoformat(expires_at)
-            days_left = (expiry_dt - datetime.now(timezone.utc)).days
-        except ValueError:
-            pass
+    expires_at = record.get("expires_at", "")
+    days_left  = _days_until_expiry(expires_at)
 
     return {
-        "email":         request.state.email,
-        "project_name":  request.state.project_name,
-        "project_token": request.state.project_token,
-        "api_key":       api_key[:12] + "...",
-        "created_at":    record.get("created_at", ""),
-        "expires_at":    expires_at,
-        "days_until_expiry": days_left,
-        "last_used_at":  record.get("last_used_at", ""),
+        "email":              request.state.email,
+        "project_name":       request.state.project_name,
+        "project_token":      request.state.project_token,
+        "api_key":            api_key[:12] + "...",
+        "created_at":         record.get("created_at", ""),
+        "expires_at":         expires_at,
+        "days_until_expiry":  days_left,
+        "last_used_at":       record.get("last_used_at", ""),
     }
 
 
@@ -143,10 +133,7 @@ def whoami(request: Request):
 
 @router.post("/key/rotate")
 def rotate_key(request: Request):
-    """
-    Rotate the current API key — resets the 90-day TTL.
-    Old key is immediately invalidated.
-    """
+    """Rotate the current API key — resets TTL to 90 days."""
     from engine.state.bigtable_client import BigtableClient
 
     client     = BigtableClient()
@@ -156,13 +143,11 @@ def rotate_key(request: Request):
     if not old_record:
         raise HTTPException(status_code=404, detail="Key record not found.")
 
-    # Deactivate old key
     old_record["active"]        = False
     old_record["revoked_at"]    = datetime.now(timezone.utc).isoformat()
     old_record["revoke_reason"] = "rotated"
     client.set(f"api_key#{old_key}", old_record)
 
-    # Issue new key with fresh TTL
     new_key    = _generate_api_key()
     now        = datetime.now(timezone.utc)
     expires_at = (now + timedelta(days=KEY_TTL_DAYS)).isoformat()
@@ -184,11 +169,7 @@ def rotate_key(request: Request):
         "project_token": old_record["project_token"],
     })
 
-    logger.info(
-        f"[Auth] Key rotated: {old_record['email']} "
-        f"old={old_key[:12]}... new={new_key[:12]}... "
-        f"expires={expires_at[:10]}"
-    )
+    logger.info(f"[Auth] Key rotated: {old_record['email']} new={new_key[:12]}...")
 
     return {
         "api_key":       new_key,
@@ -227,13 +208,110 @@ def revoke_key(request: Request):
     }
 
 
+# ── GET /auth/keys ────────────────────────────────────────────────────────────
+
+@router.get("/keys")
+def list_keys(request: Request):
+    """
+    List all registered accounts and their key status.
+    Engine owner only — requires X-UDE-Project: __engine__
+    """
+    if request.state.project_token != ENGINE_OWNER_TOK:
+        raise HTTPException(
+            status_code=403,
+            detail="list-keys is restricted to the engine owner.",
+        )
+
+    from engine.state.bigtable_client import BigtableClient
+    client   = BigtableClient()
+    all_keys = client.all_keys()
+    results  = []
+
+    for key in all_keys:
+        if not key.startswith("api_key#"):
+            continue
+        record = client.get(key)
+        if not record or not isinstance(record, dict):
+            continue
+
+        expires_at = record.get("expires_at", "")
+        days_left  = _days_until_expiry(expires_at)
+
+        results.append({
+            "email":         record.get("email", ""),
+            "project_name":  record.get("project_name", ""),
+            "project_token": record.get("project_token", "")[:20],
+            "api_key":       record.get("api_key", "")[:12] + "...",
+            "active":        record.get("active", True),
+            "created_at":    record.get("created_at", ""),
+            "expires_at":    expires_at,
+            "days_left":     days_left,
+            "last_used_at":  record.get("last_used_at", ""),
+        })
+
+    # Sort by created_at newest first
+    results.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+
+    return {"keys": results, "total": len(results)}
+
+
+# ── GET /auth/audit ───────────────────────────────────────────────────────────
+
+@router.get("/audit")
+def audit_log(
+    request: Request,
+    limit: int           = Query(20, description="Max entries to return"),
+    email: Optional[str] = Query(None, description="Filter by email"),
+):
+    """
+    View recent API audit log entries.
+
+    Engine owner sees all entries.
+    Regular users see only their own entries.
+    """
+    from engine.state.bigtable_client import BigtableClient
+
+    client      = BigtableClient()
+    all_keys    = client.all_keys()
+    is_owner    = request.state.project_token == ENGINE_OWNER_TOK
+    caller_email = request.state.email
+
+    entries = []
+    for key in sorted(all_keys, reverse=True):
+        if not key.startswith("audit_log#"):
+            continue
+
+        record = client.get(key)
+        if not record or not isinstance(record, dict):
+            continue
+
+        # Filter by caller if not engine owner
+        if not is_owner and record.get("email") != caller_email:
+            continue
+
+        # Filter by email param if provided
+        if email and record.get("email") != email:
+            continue
+
+        entries.append(record)
+        if len(entries) >= limit:
+            break
+
+    return {
+        "entries": entries,
+        "total":   len(entries),
+        "filtered_by_email": email,
+        "scope": "all" if is_owner else "own",
+    }
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _generate_api_key() -> str:
     return f"ude_live_{secrets.token_hex(32)}"
 
 
-def _find_keys_by_email(client, email: str) -> Optional[dict]:
+def _find_key_by_email(client, email: str) -> Optional[dict]:
     try:
         record = client.get(f"email#{email}")
         if not record:
@@ -246,4 +324,14 @@ def _find_keys_by_email(client, email: str) -> Optional[dict]:
             return None
         return key_record
     except Exception:
+        return None
+
+
+def _days_until_expiry(expires_at: str) -> Optional[int]:
+    if not expires_at:
+        return None
+    try:
+        expiry_dt = datetime.fromisoformat(expires_at)
+        return (expiry_dt - datetime.now(timezone.utc)).days
+    except ValueError:
         return None

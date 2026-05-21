@@ -3,8 +3,8 @@
 Config resolution for the ude CLI.
 
 Priority order (highest to lowest):
-  1. --host / --port flags passed at command level
-  2. UDE_HOST / UDE_PORT / UDE_PROJECT_TOKEN / UDE_API_KEY environment variables
+  1. --host / --port flags
+  2. UDE_HOST / UDE_PORT / UDE_PROJECT_TOKEN / UDE_API_KEY env vars
   3. ~/.ude/config.yml
   4. Hardcoded defaults (localhost:8000)
 """
@@ -21,10 +21,9 @@ import yaml
 CONFIG_DIR  = Path.home() / ".ude"
 CONFIG_FILE = CONFIG_DIR / "config.yml"
 
-DEFAULT_HOST = "localhost"
-DEFAULT_PORT = 8000
-DEFAULT_ENV  = "local"
-
+DEFAULT_HOST  = "localhost"
+DEFAULT_PORT  = 8000
+DEFAULT_ENV   = "local"
 ENGINE_OWNER_TOKEN = "__engine__"
 
 
@@ -37,13 +36,17 @@ class UDEConfig:
     timeout:       int  = 30
     project_token: str  = ""
     project_name:  str  = ""
-    api_key:       str  = ""        # Bearer token for API authentication
-    email:         str  = ""        # account email
+    api_key:       str  = ""
+    email:         str  = ""
+    use_https:     bool = False
+    tls_cert:      str  = ""
+    tls_key:       str  = ""
     extra:         dict = field(default_factory=dict)
 
     @property
     def api_base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        scheme = "https" if self.use_https else "http"
+        return f"{scheme}://{self.host}:{self.port}"
 
     @property
     def is_local(self) -> bool:
@@ -59,15 +62,17 @@ class UDEConfig:
 
     @property
     def is_authenticated(self) -> bool:
-        """True if an API key is configured."""
         return bool(self.api_key)
+
+    @property
+    def has_tls(self) -> bool:
+        return self.use_https and bool(self.tls_cert) and bool(self.tls_key)
 
 
 def load_config(
     host: str | None = None,
     port: int | None = None,
 ) -> UDEConfig:
-    """Load config with full priority chain."""
     file_cfg = _load_file()
 
     resolved_host = (
@@ -100,8 +105,11 @@ def load_config(
         os.getenv("UDE_API_KEY")
         or file_cfg.get("api_key", "")
     )
-    resolved_name  = file_cfg.get("project_name", "")
-    resolved_email = file_cfg.get("email", "")
+    resolved_name     = file_cfg.get("project_name", "")
+    resolved_email    = file_cfg.get("email", "")
+    resolved_https    = file_cfg.get("use_https", False)
+    resolved_tls_cert = file_cfg.get("tls_cert", "")
+    resolved_tls_key  = file_cfg.get("tls_key", "")
 
     return UDEConfig(
         host=resolved_host,
@@ -113,15 +121,14 @@ def load_config(
         project_name=resolved_name,
         api_key=resolved_api_key,
         email=resolved_email,
+        use_https=resolved_https,
+        tls_cert=resolved_tls_cert,
+        tls_key=resolved_tls_key,
         extra=file_cfg,
     )
 
 
 def generate_token(project_name: str) -> str:
-    """
-    Generate a project-scoped token.
-    Format: proj_{slug}-{6 random chars}
-    """
     slug = (
         project_name.lower()
         .replace(" ", "-")
@@ -133,7 +140,6 @@ def generate_token(project_name: str) -> str:
 
 
 def _load_file() -> dict:
-    """Read ~/.ude/config.yml if it exists."""
     if not CONFIG_FILE.exists():
         return {}
     try:
@@ -145,7 +151,6 @@ def _load_file() -> dict:
 
 
 def write_config(cfg: dict) -> None:
-    """Write (or overwrite) ~/.ude/config.yml."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with CONFIG_FILE.open("w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)

@@ -8,8 +8,22 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
+import logging
+import warnings
 import typer
+
+# Suppress SSL warnings for self-signed certs in local dev
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
 from rich.panel import Panel
+
+# Suppress noisy Bigtable INFO logs in CLI context
+logging.getLogger('engine.state.bigtable_client').setLevel(logging.WARNING)
+logging.getLogger('config.loader').setLevel(logging.WARNING)
 
 from cli.commands import dbt, lifecycle, observe, pipeline, quarantine, schema
 from cli.commands import auth

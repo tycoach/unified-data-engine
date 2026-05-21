@@ -38,6 +38,7 @@ def assert_stack_running(cfg: UDEConfig) -> None:
             f"{cfg.api_base_url}/health",
             timeout=3.0,
             follow_redirects=True,
+            verify=False,  # allow self-signed certs for local dev
         )
         resp.raise_for_status()
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError):

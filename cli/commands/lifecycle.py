@@ -623,12 +623,38 @@ def _ensure_dbt_deps() -> None:
 
 def _start_api() -> None:
     python = sys.executable
+    cmd    = [
+        python, "-m", "uvicorn", "api.main:app",
+        "--host", "0.0.0.0",
+        "--port", str(_get_api_port()),
+        "--log-level", "warning",
+    ]
+    # Add TLS args if configured
+    tls_cert = Path.home() / ".ude" / "tls" / "server.crt"
+    tls_key  = Path.home() / ".ude" / "tls" / "server.key"
+    if tls_cert.exists() and tls_key.exists():
+        cmd += ["--ssl-certfile", str(tls_cert), "--ssl-keyfile", str(tls_key)]
+        print_info("HTTPS enabled — TLS certificate loaded")
+
     subprocess.Popen(
-        [python, "-m", "uvicorn", "api.main:app",
-         "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"],
+        cmd,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         cwd=str(Path.cwd()),
     )
+
+
+def _get_api_port() -> int:
+    """Read port from ~/.ude/config.yml, default 8000."""
+    try:
+        import yaml
+        cfg_file = Path.home() / ".ude" / "config.yml"
+        if cfg_file.exists():
+            with cfg_file.open() as f:
+                cfg = yaml.safe_load(f) or {}
+            return cfg.get("port", 8000)
+    except Exception:
+        pass
+    return 8000
 
 
 def _start_streamlit() -> None:

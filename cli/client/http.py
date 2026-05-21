@@ -84,6 +84,7 @@ class UDEHttpClient:
                     timeout=self._timeout,
                     headers=self._headers(path),
                     follow_redirects=True,
+                    verify=False,  # allow self-signed certs for local dev
                 )
 
                 if resp.status_code in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES - 1:
