@@ -348,6 +348,7 @@ def run():
         )
 
         # ── Hot-reload pipelines every cycle ─────────────────────────────────
+        _run_daily_jobs()  # expiry notifications — no-op until 24h elapsed
         # Picks up pipelines registered via POST /pipeline/ without restart.
         # Also picks up new filesystem YAML files dropped into config/pipelines/.
         pipelines = load_pipelines()
@@ -392,6 +393,31 @@ def run():
             time.sleep(LOOP_SLEEP_SECONDS)
 
     logger.info("[Main] Engine stopped cleanly.")
+
+
+# ── Daily expiry notification job ────────────────────────────────────────────
+
+_last_expiry_check: float = 0.0
+_EXPIRY_CHECK_INTERVAL = 86400  # once per day
+
+def _run_daily_jobs() -> None:
+    """Run background jobs that execute once per day."""
+    global _last_expiry_check
+    import time as _time
+    now = _time.time()
+    if now - _last_expiry_check < _EXPIRY_CHECK_INTERVAL:
+        return
+    _last_expiry_check = now
+    try:
+        from engine.notifications.email_notifier import run_expiry_check
+        result = run_expiry_check()
+        if result.get("notified", 0) > 0:
+            logger.info(
+                f"[Main] Expiry notifications sent: {result['notified']} "
+                f"(checked={result['checked']} skipped={result['skipped']})"
+            )
+    except Exception as exc:
+        logger.warning(f"[Main] Daily expiry check failed: {exc}")
 
 
 if __name__ == "__main__":

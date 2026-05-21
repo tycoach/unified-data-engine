@@ -4,9 +4,10 @@ API key authentication middleware.
 
 Security features:
   1. Bearer token validation on every non-public request
-  2. Key expiry check (90-day TTL by default)
+  2. Key expiry check (90-day TTL)
   3. Rate limiting on /auth/signup (5 attempts per IP per hour)
   4. Audit logging of every authenticated request to Bigtable
+  5. Suspicious activity detection (same key, 2 IPs, 60s window) → webhook
 """
 
 import logging
@@ -21,162 +22,110 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
 
-# ── Public routes (no auth required) ─────────────────────────────────────────
-
 PUBLIC_ROUTES = {
-    "/",
-    "/health",
-    "/health/",
-    "/docs",
-    "/openapi.json",
-    "/redoc",
-    "/metrics",
-    "/auth/signup",
-    "/auth/signup/",
+    "/", "/health", "/health/", "/docs", "/openapi.json",
+    "/redoc", "/metrics", "/auth/signup", "/auth/signup/",
 }
-
 PUBLIC_PREFIXES = ("/docs/", "/openapi")
 
-# ── Rate limiting — in-memory (per IP, per route) ─────────────────────────────
-# Simple sliding window counter. Resets on server restart.
-# For production, replace with Redis-backed limiter.
-
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
-
 RATE_LIMITS = {
-    "/auth/signup": (5, 3600),    # 5 requests per hour per IP
+    "/auth/signup":  (5, 3600),
     "/auth/signup/": (5, 3600),
 }
 
 
 def _check_rate_limit(ip: str, path: str) -> bool:
-    """
-    Returns True if the request is allowed, False if rate limited.
-    Uses a sliding window — drops timestamps older than the window.
-    """
     if path not in RATE_LIMITS:
         return True
-
     max_requests, window_seconds = RATE_LIMITS[path]
-    key     = f"{ip}:{path}"
-    now     = time.time()
-    cutoff  = now - window_seconds
-
-    # Drop expired timestamps
-    _rate_limit_store[key] = [
-        t for t in _rate_limit_store[key] if t > cutoff
-    ]
-
+    key    = f"{ip}:{path}"
+    now    = time.time()
+    cutoff = now - window_seconds
+    _rate_limit_store[key] = [t for t in _rate_limit_store[key] if t > cutoff]
     if len(_rate_limit_store[key]) >= max_requests:
         return False
-
     _rate_limit_store[key].append(now)
     return True
 
 
-# ── Middleware ────────────────────────────────────────────────────────────────
-
 class APIKeyMiddleware(BaseHTTPMiddleware):
-    """
-    Starlette middleware that:
-    1. Rate limits public endpoints (signup)
-    2. Validates Bearer tokens on protected endpoints
-    3. Checks key expiry
-    4. Injects identity into request.state
-    5. Writes audit log entry
-    """
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         ip   = request.client.host if request.client else "unknown"
 
-        # ── Rate limiting (applies to public routes too) ───────────────────
+        # Rate limiting
         if not _check_rate_limit(ip, path):
             logger.warning(f"[Auth] Rate limit exceeded: {ip} → {path}")
             return JSONResponse(
                 status_code=429,
-                content={
-                    "detail": (
-                        "Too many requests. "
-                        "Signup is limited to 5 attempts per hour per IP."
-                    )
-                },
+                content={"detail": "Too many requests. Signup is limited to 5 per hour per IP."},
                 headers={"Retry-After": "3600"},
             )
 
-        # ── Public routes — skip auth ──────────────────────────────────────
+        # Public routes
         if path in PUBLIC_ROUTES or any(path.startswith(p) for p in PUBLIC_PREFIXES):
             return await call_next(request)
 
-        # ── Extract Bearer token ───────────────────────────────────────────
+        # Extract Bearer token
         api_key = _extract_bearer(request)
         if not api_key:
             return JSONResponse(
                 status_code=401,
-                content={
-                    "detail": (
-                        "Missing API key. "
-                        "Sign up at POST /auth/signup or run: ude auth signup"
-                    )
-                },
+                content={"detail": "Missing API key. Sign up at POST /auth/signup or run: ude auth signup"},
             )
 
-        # ── Validate key ───────────────────────────────────────────────────
+        # Validate key
         record = _lookup_key(api_key)
         if not record:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid API key."},
-            )
+            return JSONResponse(status_code=401, content={"detail": "Invalid API key."})
 
         if not record.get("active", True):
             return JSONResponse(
                 status_code=401,
-                content={
-                    "detail": (
-                        "API key has been revoked. "
-                        "Run: ude auth signup to create a new account."
-                    )
-                },
+                content={"detail": "API key has been revoked. Run: ude auth signup to create a new account."},
             )
 
-        # ── Check expiry ───────────────────────────────────────────────────
+        # Check expiry
         expires_at = record.get("expires_at")
         if expires_at:
             try:
-                expiry_dt = datetime.fromisoformat(expires_at)
-                if datetime.now(timezone.utc) > expiry_dt:
+                if datetime.now(timezone.utc) > datetime.fromisoformat(expires_at):
                     return JSONResponse(
                         status_code=401,
-                        content={
-                            "detail": (
-                                f"API key expired on {expires_at[:10]}. "
-                                "Run: ude auth rotate to get a new key."
-                            )
-                        },
+                        content={"detail": f"API key expired on {expires_at[:10]}. Run: ude auth rotate"},
                     )
             except ValueError:
-                pass  # malformed date — let it through
+                pass
 
-        # ── Inject identity into request.state ─────────────────────────────
+        # Inject identity
         explicit_token = request.headers.get("X-UDE-Project", "")
-        project_token  = (
-            "__engine__"
-            if explicit_token == "__engine__"
-            else record.get("project_token", "")
-        )
+        project_token  = "__engine__" if explicit_token == "__engine__" else record.get("project_token", "")
 
         request.state.project_token = project_token
         request.state.email         = record.get("email", "")
         request.state.project_name  = record.get("project_name", "")
         request.state.api_key       = api_key
 
-        # ── Process request ────────────────────────────────────────────────
+        # Suspicious activity detection (non-blocking)
+        try:
+            from engine.notifications.webhook import check_and_fire
+            check_and_fire(
+                api_key=api_key,
+                ip=ip,
+                email=record.get("email", ""),
+                project_name=record.get("project_name", ""),
+            )
+        except Exception:
+            pass
+
+        # Process request
         start    = time.time()
         response = await call_next(request)
         duration = time.time() - start
 
-        # ── Audit log (best effort, non-blocking) ──────────────────────────
+        # Audit log
         _write_audit_log(
             api_key=api_key,
             email=record.get("email", ""),
@@ -187,19 +136,11 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             duration_ms=int(duration * 1000),
         )
 
-        # ── Update last_used_at (best effort) ──────────────────────────────
+        # Touch last_used_at
         _touch_key(api_key, record)
-
-        logger.debug(
-            f"[Auth] {request.method} {path} {response.status_code} "
-            f"{int(duration*1000)}ms — {record.get('email', '')} "
-            f"key={api_key[:12]}..."
-        )
 
         return response
 
-
-# ── Private helpers ───────────────────────────────────────────────────────────
 
 def _extract_bearer(request: Request) -> Optional[str]:
     auth = request.headers.get("Authorization", "")
@@ -228,26 +169,14 @@ def _touch_key(api_key: str, record: dict) -> None:
 
 
 def _write_audit_log(
-    api_key: str,
-    email: str,
-    project_token: str,
-    method: str,
-    path: str,
-    status_code: int,
-    duration_ms: int,
+    api_key: str, email: str, project_token: str,
+    method: str, path: str, status_code: int, duration_ms: int,
 ) -> None:
-    """
-    Write an audit log entry to Bigtable.
-
-    Key format: audit_log#{timestamp}#{truncated_key}
-    Keeps a full trail of API usage for security review.
-    """
     try:
         from engine.state.bigtable_client import BigtableClient
-        now    = datetime.now(timezone.utc)
-        ts     = now.strftime("%Y%m%dT%H%M%S%f")
+        now     = datetime.now(timezone.utc)
+        ts      = now.strftime("%Y%m%dT%H%M%S%f")
         log_key = f"audit_log#{ts}#{api_key[:8]}"
-
         BigtableClient().set(log_key, {
             "timestamp":     now.isoformat(),
             "email":         email,
@@ -259,4 +188,4 @@ def _write_audit_log(
             "duration_ms":   duration_ms,
         })
     except Exception:
-        pass  # never let audit logging block a request
+        pass
