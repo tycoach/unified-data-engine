@@ -1,10 +1,10 @@
 # Unified Data Engine
 
-A GCP-native, dbt-powered micro-batch data pipeline engine with a full operator CLI.
+A cloud-native, GCP-first, dbt-powered micro-batch data pipeline engine with a full operator CLI.
 
 ```bash
 pip install unified-data-engine
-ude init
+ude auth signup
 ude up
 ```
 
@@ -14,12 +14,12 @@ ude up
 
 UDE is a self-contained data processing platform for platform data engineers who need production-grade SCD handling, schema drift detection, and full observability — without the overhead of enterprise-scale tools.
 
-**The core promise:** register a pipeline via `ude pipeline new`, publish data to Pub/Sub (or POST directly to the API), and the engine handles everything else — schema inference, edge case gating, dbt transformations, checkpointing, and metrics.
+**The core promise:** register a pipeline via `ude pipeline new`, push data via HTTP or Pub/Sub, and the engine handles everything else — schema inference, edge case gating, dbt transformations, checkpointing, and metrics.
 
 ### What happens on every 30-second batch cycle:
 
 ```
-Cloud Pub/Sub (MiniSky)
+Cloud Pub/Sub  ─or─  POST /pipeline/{id}/ingest
         ↓
    Pull messages (30s window)
         ↓
@@ -31,7 +31,7 @@ Cloud Pub/Sub (MiniSky)
         ↓
    dbt run → snapshot (SCD Type 2) → mart (SCD Type 1) → tests
         ↓
-   Checkpoint + Pub/Sub ack  ← only after all tests pass
+   Checkpoint + ack  ← only after all dbt tests pass
         ↓
    Push metrics → Prometheus → Grafana
 ```
@@ -57,6 +57,7 @@ Adding a new pipeline = `ude pipeline new`. Zero engine code changes.
 | Component | Technology | Role |
 |---|---|---|
 | Message bus | Cloud Pub/Sub | Ingestion, micro-batch rhythm |
+| Direct ingest | FastAPI `/ingest` | HTTP push — no Pub/Sub client needed |
 | Transformation | dbt Core | SCD via snapshots + incremental |
 | Dev adapter | dbt-duckdb | Zero-config local development |
 | Prod adapter | dbt-bigquery | Production GCP target |
@@ -64,14 +65,15 @@ Adding a new pipeline = `ude pipeline new`. Zero engine code changes.
 | Hot state | Bigtable (local: JSON files) | Schema versions, offsets, checkpoints |
 | Target store | BigQuery | Staging, snapshots, marts, quarantine |
 | API | FastAPI | Control plane — 20+ REST endpoints |
+| Auth | Bearer tokens + Bigtable | Self-service API keys, 90-day TTL |
 | CLI | Typer + Rich | `ude` — operator CLI, pip-installable |
 | Dashboard | Streamlit | Operator UI — 5 pages |
 | Metrics | Prometheus + Pushgateway | Engine + dbt metrics pipeline |
-| Dashboards | Grafana | 2 live dashboards |
+| Dashboards | Grafana | 2 live dashboards (auto-provisioned) |
 | Local GCP | MiniSky | Emulates all GCP services locally |
 | Infra-as-code | Terraform | Provisions MiniSky + real GCP |
 
-100% open source. No vendor lock-in.
+Cloud-native, GCP-first. AWS and self-hosted providers on the roadmap.
 
 ---
 
@@ -112,10 +114,10 @@ uv tool install unified-data-engine
 
 ---
 
-## Engine Setup (contributors + self-hosted)
+## Engine Setup (contributors + self-hosted GCP)
 
 ```bash
-# 1. Install MiniSky
+# 1. Install MiniSky (local GCP emulator)
 curl -sSL https://minisky.bmics.com.ng/install.sh | sh
 
 # 2. Clone and install
@@ -125,8 +127,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 3. Initialise your project
-ude init
+# 3. Create your account
+ude auth signup
 
 # 4. Start everything — one command
 ude up
@@ -156,6 +158,59 @@ ude status
 ```
 
 ![ude status](assets/udee.png)
+
+---
+
+## Authentication
+
+UDE uses self-service API keys. Every CLI command and API call requires a valid Bearer token.
+
+```bash
+# Create an account — get your API key
+ude auth signup --email you@company.com --project my-project
+
+# Your key is saved to ~/.ude/config.yml automatically
+# It is shown once — store it securely
+```
+
+Public endpoints (no auth required): `GET /`, `GET /health`, `POST /auth/signup`, `GET /metrics`
+
+Everything else requires: `Authorization: Bearer ude_live_<key>`
+
+### Auth commands
+
+```bash
+ude auth signup          # Create account, get API key
+ude auth whoami          # Show identity + key expiry
+ude auth rotate          # Rotate key — old key invalidated immediately
+ude auth revoke          # Revoke key permanently
+ude auth list-keys       # List all accounts (engine owner only)
+ude auth audit           # View API audit log
+ude auth audit --watch   # Live stream audit log (Ctrl+C to stop)
+ude auth email-config    # Configure Gmail SMTP for expiry notifications
+ude auth webhook-config  # Configure webhook for suspicious activity alerts
+```
+
+### Key expiry
+
+API keys expire after **90 days**. You will receive an email warning 14 days before expiry if SMTP is configured. `ude auth whoami` shows days remaining.
+
+```bash
+# Set up expiry email notifications
+ude auth email-config --email you@gmail.com --test
+
+# Rotate before expiry (resets TTL to 90 days)
+ude auth rotate
+```
+
+### Engine owner
+
+The engine owner has full visibility across all projects. Set in `~/.ude/config.yml`:
+
+```yaml
+api_key: ude_live_...
+project_token: __engine__
+```
 
 ---
 
@@ -215,7 +270,7 @@ ude quarantine replay  <batch_id>     # Force immediate replay
 ### dbt commands
 
 ```bash
-ude dbt run                   # Run all dbt models (auto-injects --profiles-dir, --vars)
+ude dbt run                   # Run all dbt models
 ude dbt test                  # Run dbt tests
 ude dbt snapshot              # Run dbt snapshots (SCD Type 2)
 ude dbt docs                  # Generate + serve dbt docs
@@ -242,17 +297,11 @@ ude observe metrics           # Prometheus metrics snapshot as a Rich table
 
 ## Project Tokens — Multi-Tenant Isolation
 
-`ude init` generates a project token saved to `~/.ude/config.yml`. Every CLI command sends this token as `X-UDE-Project` on every API call.
-
-```
-ude init
-→ Project token: proj_acme-analytics-a3f9b2
-  Saved to: ~/.ude/config.yml
-```
+`ude auth signup` generates a project token saved to `~/.ude/config.yml`. Every CLI command sends this token as `X-UDE-Project` on every API call.
 
 **What this means:**
 - `ude pipeline list` only shows pipelines you registered — never the engine owner's internal pipelines
-- Engine-internal filesystem pipelines (`customers`, `orders`, `products`) are never exposed to external callers
+- Engine-internal filesystem pipelines are never exposed to external callers
 - Two users with different tokens are fully isolated from each other
 - Share your token with teammates who need access to the same project
 
@@ -260,16 +309,16 @@ ude init
 # ~/.ude/config.yml
 host: <engine-host>
 port: 8000
-env: local
-minisky_url: http://localhost:8080
+api_key: ude_live_...
 project_token: proj_acme-analytics-a3f9b2
 project_name: acme-analytics
+email: you@company.com
 ```
 
 Override via env var:
 ```bash
+export UDE_API_KEY=ude_live_...
 export UDE_PROJECT_TOKEN=proj_acme-analytics-a3f9b2
-ude pipeline list
 ```
 
 ---
@@ -280,30 +329,28 @@ ude pipeline list
 # 1. Install
 pipx install unified-data-engine
 
-# 2. Initialise project (generates your token)
-ude init
+# 2. Create your account
+ude auth signup --email you@company.com --project my-project
 
 # 3. Configure engine host
 # Edit ~/.ude/config.yml:
 #   host: <engine-host>
-#   port: 8000
+#   port: 8000 (or 8443 for HTTPS)
 
-# 4. Start monitoring
+# 4. Start your local monitoring stack
 ude observe start
 
 # 5. Register your first pipeline
 ude pipeline new
 
-# 6. Confirm it's registered
-ude pipeline list
-
-# 7. Push data — no Pub/Sub client needed
-curl -X POST http://<engine-host>:8000/pipeline/events/ingest \
-  -H "X-UDE-Project: proj_acme-analytics-a3f9b2" \
+# 6. Push data — no Pub/Sub client needed
+curl -X POST https://<engine-host>:8443/pipeline/events/ingest \
+  -H "Authorization: Bearer ude_live_..." \
+  -H "X-UDE-Project: proj_my-project-abc123" \
   -H "Content-Type: application/json" \
   -d '{"records": [{"event_id": "e1", "user_id": "u1", ...}]}'
 
-# 8. Watch it process
+# 7. Watch it process
 ude observe watch
 ```
 
@@ -311,46 +358,23 @@ ude observe watch
 
 ## Sending Data — Two Paths
 
-### Path A — Direct HTTP ingest (no Pub/Sub client needed)
+### Path A — Direct HTTP ingest (recommended for 3rd party users)
 
-Any application can push records directly to the engine with a single HTTP POST.
-No Pub/Sub SDK. No topic management. No configuration on the caller's side.
+No Pub/Sub SDK. No topic management. One HTTP POST.
 
 ```bash
 POST /pipeline/{pipeline_id}/ingest
-Headers: X-UDE-Project: <your-token>
-Body:    {"records": [...], "batch_hint": "optional-label"}
-```
+Authorization: Bearer ude_live_...
+X-UDE-Project: proj_acme-analytics-a3f9b2
+Content-Type: application/json
 
-Example:
-
-```bash
-curl -X POST http://localhost:8000/pipeline/events/ingest \
-  -H "Content-Type: application/json" \
-  -H "X-UDE-Project: proj_acme-analytics-a3f9b2" \
-  -d '{
-    "records": [
-      {"event_id": "e1", "user_id": "u1", "event_type": "click", "created_at": "2026-05-20T12:00:00"},
-      {"event_id": "e2", "user_id": "u2", "event_type": "view",  "created_at": "2026-05-20T12:00:01"}
-    ],
-    "batch_hint": "my-app-v1"
-  }'
-```
-
-Response:
-
-```json
 {
-  "pipeline_id": "events",
-  "topic": "raw.events",
-  "records_published": 2,
-  "message_ids": ["1", "2"],
-  "status": "published",
-  "note": "Records will be processed on the next 30s engine cycle."
+  "records": [
+    {"event_id": "e1", "user_id": "u1", "event_type": "click", "created_at": "2026-05-20T12:00:00"},
+    {"event_id": "e2", "user_id": "u2", "event_type": "view",  "created_at": "2026-05-20T12:00:01"}
+  ]
 }
 ```
-
-Supports up to **10,000 records per call**. Records are picked up by the engine on the next 30-second cycle.
 
 From Python:
 
@@ -358,27 +382,20 @@ From Python:
 import requests
 
 requests.post(
-    "http://your-engine-host:8000/pipeline/events/ingest",
-    headers={"X-UDE-Project": "proj_acme-analytics-a3f9b2"},
+    "https://your-engine-host:8443/pipeline/events/ingest",
+    headers={
+        "Authorization": "Bearer ude_live_...",
+        "X-UDE-Project":  "proj_acme-analytics-a3f9b2",
+    },
     json={"records": your_records}
 )
 ```
 
-### Path B — Pub/Sub publish (existing pipelines)
+Supports up to 10,000 records per call. Processed on the next 30-second cycle.
 
-Publish directly to the pipeline's Pub/Sub topic if you already have a Pub/Sub client:
+### Path B — Pub/Sub publish (existing GCP pipelines)
 
-```python
-import base64, json, urllib.request
-
-records = [{"event_id": "e1", ...}]
-messages = [{"data": base64.b64encode(json.dumps(r).encode()).decode()} for r in records]
-urllib.request.urlopen(urllib.request.Request(
-    "http://localhost:8080/v1/projects/local-dev-project/topics/raw.events:publish",
-    data=json.dumps({"messages": messages}).encode(),
-    headers={"Content-Type": "application/json"},
-))
-```
+Publish directly to the pipeline's Pub/Sub topic if you already have a Pub/Sub client.
 
 ---
 
@@ -390,13 +407,7 @@ urllib.request.urlopen(urllib.request.Request(
 ude pipeline new
 ```
 
-Scaffolds locally and registers with the engine in one shot:
-- `config/pipelines/{id}.yml`
-- `dbt/models/staging/{id}_staged.sql`
-- `dbt/models/marts/dim_{id}.sql`
-- `dbt/snapshots/{id}_snapshot.sql` (SCD Type 2 only)
-
-Engine picks it up on the next cycle — no restart needed.
+Scaffolds and registers in one shot. Engine picks it up on the next cycle — no restart needed.
 
 ### Option B — Manual YAML + register
 
@@ -415,12 +426,11 @@ fields:
   event_id:   { type: string,   nullable: false }
   user_id:    { type: string,   nullable: false }
   event_type: { type: string,   nullable: false }
-  payload:    { type: string,   nullable: true }
   created_at: { type: datetime, nullable: false }
 ```
 
 ```bash
-ude pipeline register events   # register with running engine
+ude pipeline register events
 ```
 
 ---
@@ -463,6 +473,54 @@ ude schema approve customers   # Approve + unblock pipeline
 
 ---
 
+## Security
+
+### API key authentication
+
+All endpoints (except `/`, `/health`, `/auth/signup`, `/metrics`) require:
+```
+Authorization: Bearer ude_live_<key>
+```
+
+### Rate limiting
+
+Signup is limited to 5 attempts per IP per hour. Excessive requests return `429 Too Many Requests`.
+
+### Key expiry
+
+All API keys expire after 90 days. The engine sends email warnings 14 days before expiry if SMTP is configured.
+
+### Audit logging
+
+Every authenticated request is written to the audit log. View with:
+
+```bash
+ude auth audit --limit 20
+ude auth audit --watch          # live stream
+ude auth audit --email user@x   # filter by user (engine owner only)
+```
+
+### Suspicious activity detection
+
+The engine detects when the same API key is used from two different IP addresses within 60 seconds and fires a webhook alert. Configure with:
+
+```bash
+ude auth webhook-config --url https://hooks.slack.com/... --test
+```
+
+### HTTPS (local dev)
+
+```bash
+python3 scripts/setup_https.py
+# Generates ~/.ude/tls/server.crt and server.key via openssl
+# Updates ~/.ude/config.yml with use_https: true, port: 8443
+# ude up auto-detects and starts API with TLS
+```
+
+For production, place UDE behind a reverse proxy (nginx, Caddy) with a CA-signed certificate.
+
+---
+
 ## Operator Dashboard
 
 Five pages at `http://localhost:8501`:
@@ -481,10 +539,11 @@ Five pages at `http://localhost:8501`:
 
 ![ude controlpanel](assets/ude-cp.png)
 
-FastAPI at `http://localhost:8000/docs` — 20+ endpoints across 6 routers.
+FastAPI at `http://localhost:8000/docs` — 20+ endpoints across 7 routers.
 
 | Router | Key endpoints |
 |---|---|
+| `/auth` | signup, whoami, rotate, revoke, list-keys, audit |
 | `/health` | Stack health, MiniSky connectivity |
 | `/pipeline` | List, inspect, register, enable/disable, ingest, batch history |
 | `/schema` | Show, history, diff, sync, approve migration |
@@ -493,7 +552,7 @@ FastAPI at `http://localhost:8000/docs` — 20+ endpoints across 6 routers.
 | `/metrics/structured` | JSON metrics scraped from Pushgateway |
 | `/logs/stream` | NDJSON log stream for `ude observe logs` |
 
-All endpoints are scoped to `X-UDE-Project` header — external callers only see their own pipelines.
+All endpoints are scoped to `X-UDE-Project` — external callers only see their own pipelines.
 
 ---
 
@@ -506,6 +565,8 @@ ude observe start   # starts Prometheus + Pushgateway + Grafana via Docker
 ![Grafana — Engine Overview](assets/grafana.png)
 
 ![Grafana — dbt Health](assets/grafana_2.png)
+
+Both Grafana dashboards are provisioned automatically on `ude up` — no manual import needed.
 
 Prometheus scrapes `http://localhost:8000/metrics` + Pushgateway at `:9091`.
 
@@ -544,7 +605,19 @@ MiniSky loses all Pub/Sub and BigQuery state on restart. Simply run:
 ude up
 ```
 
-`ude up` automatically re-provisions all topics and subscriptions for every registered pipeline — filesystem and API-registered — before starting any other service. No manual `make provision` needed.
+`ude up` automatically re-provisions all topics and subscriptions for every registered pipeline on every startup. No manual `make provision` needed.
+
+---
+
+## Deploying to Real GCP
+
+No engine code changes needed:
+
+1. Set `GOOGLE_APPLICATION_CREDENTIALS` to your service account key
+2. Update `config/engine.yml` → `environment: production`
+3. Update `dbt/profiles.yml` → `target: prod`
+4. Run `terraform apply` in `terraform/`
+5. For HTTPS: place UDE behind nginx or Caddy with a CA-signed cert
 
 ---
 
@@ -557,48 +630,42 @@ unified-data-engine/
 │   ├── loader.py               Pipeline loader — filesystem + Bigtable
 │   └── pipelines/              One YAML per pipeline (engine-internal)
 ├── engine/
-│   ├── main.py                 Micro-batch loop (hot-reloads pipelines per cycle)
+│   ├── main.py                 Micro-batch loop (hot-reloads per cycle)
 │   ├── ingestion/              Pub/Sub consumer + offset manager
 │   ├── schema/                 Inference, registry, deviation, contract writer
 │   ├── staging/                Edge case gate + BigQuery staging writer
 │   ├── dbt_runner/             dbt orchestration + results parser
 │   ├── state/                  Bigtable client + checkpoint manager
-│   └── metrics/                Prometheus metric emitters
+│   ├── metrics/                Prometheus metric emitters
+│   └── notifications/          Email expiry warnings + webhook alerts
 ├── dbt/
 │   ├── models/staging/         One view per dataset
 │   ├── models/marts/           SCD Type 1 incremental models
 │   └── snapshots/              SCD Type 2 snapshot declarations
-├── api/                        FastAPI — 20+ endpoints, 6 routers
+├── api/
+│   ├── middleware/auth.py      Bearer token validation + rate limiting
+│   └── routers/                auth, health, pipeline, schema, quarantine, dbt
 ├── cli/                        ude CLI — Typer + Rich, pip-installable
-│   ├── commands/               lifecycle, dbt, pipeline, schema, quarantine, observe
-│   ├── client/                 HTTP client wrapping FastAPI endpoints
+│   ├── commands/               auth, lifecycle, dbt, pipeline, schema, quarantine, observe
+│   ├── client/                 HTTP clients for all API routers
+│   ├── data/dashboards/        Grafana JSON bundled in pip wheel
 │   ├── scaffold/               ude init + ude pipeline new generators
-│   ├── output/                 Rich tables, panels, live watch display
 │   └── core/                   Config, errors, checks, context
 ├── ui/                         Streamlit — 5 operator pages
 ├── monitoring/
 │   ├── prometheus/             prometheus.yml + alerts.yml (7 rules)
 │   └── grafana/dashboards/     engine_overview.json + dbt_health.json
+├── scripts/
+│   └── setup_https.py          Generate self-signed TLS cert via openssl
 ├── data-generator/scenarios/   happy_path.py, products.py
 ├── tests/
 │   ├── unit/cli/               92 passing unit tests
 │   └── integration/cli/        Integration test stubs
 ├── assets/                     CLI screenshots
-├── pyproject.toml              Package manifest — pip install unified-data-engine
+├── pyproject.toml              Package manifest
 ├── Makefile                    Engine dev commands
 └── .env.example
 ```
-
----
-
-## Deploying to Real GCP
-
-No engine code changes needed:
-
-1. Set `GOOGLE_APPLICATION_CREDENTIALS` to your service account key
-2. Update `config/engine.yml` → `environment: production`
-3. Update `dbt/profiles.yml` → `target: prod`
-4. Run `terraform apply` in `terraform/`
 
 ---
 
@@ -614,8 +681,9 @@ No engine code changes needed:
 | Operator commands require SSH + curl | `ude quarantine approve`, `ude schema diff` from anywhere |
 | 3rd party users can see internal pipelines | Project token scoping — full multi-tenant isolation |
 | Startup requires 6 separate commands | `ude up` — one command, all 6 components |
-| Getting data in requires a Pub/Sub client | `POST /pipeline/{id}/ingest` — plain HTTP, no SDK needed |
-| Vendor lock-in to expensive platforms | 100% open source, GCP-native, MiniSky for local dev |
+| Getting data in requires a Pub/Sub client | `POST /pipeline/{id}/ingest` — plain HTTP, no SDK |
+| API keys with no expiry or audit trail | 90-day TTL, audit log, expiry emails, webhook alerts |
+| Vendor lock-in to expensive platforms | Cloud-native, GCP-first. AWS + self-hosted on roadmap. |
 
 ---
 
@@ -623,15 +691,19 @@ No engine code changes needed:
 
 | Version | PyPI | What shipped |
 |---|---|---|
-| `2.6.0` | ✓ latest | `POST /pipeline/{id}/ingest` — direct HTTP data ingestion |
-| `2.5.0` | — | `ude up` one-command startup, auto-provision, monitoring included |
+| `3.1.0` | ✓ latest | Email expiry notifications, `ude auth audit --watch`, suspicious activity webhook |
+| `3.0.0` | ✓ | HTTPS, `ude auth list-keys`, `ude auth audit`, expiry warnings in whoami |
+| `2.9.0` | ✓ | Rate limiting, key expiry (90-day TTL), audit logging, Grafana password |
+| `2.8.0` | ✓ | API key authentication — self-service signup, Bearer tokens, project scoping |
+| `2.7.2` | ✓ | Grafana dashboards auto-provisioned on `ude up`, Prometheus scrapes Pushgateway |
+| `2.6.0` | ✓ | `ude up` one-command startup, auto-provision, context-aware for pip users |
+| `2.0.0` | ✓ | Initial PyPI release — baseline engine + CLI |
 | `1.6.0` | — | `ude up` full stack — no make required |
 | `1.5.0` | — | Engine hot-reload + `ude observe start/stop` |
 | `1.4.0` | — | Project token scoping — multi-tenant pipeline isolation |
 | `1.2.0` | — | `POST /pipeline/` — register pipelines without filesystem access |
 | `1.1.0` | — | FastAPI endpoints wired — full CLI to API round trip |
 | `1.0.0-cli` | — | `ude` CLI complete — 92/92 unit tests, all 6 command groups |
-| `2.0.0` | ✓ | Initial PyPI release — baseline engine + CLI |
 
 ---
 
