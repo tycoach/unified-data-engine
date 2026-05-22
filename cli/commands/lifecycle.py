@@ -191,10 +191,22 @@ def up(ctx: typer.Context) -> None:
             raise typer.Exit(code=1)
         print_success(f"API ready at {cfg.api_base_url}/docs")
     else:
-        print_warning(
-            f"API not running at {cfg.api_base_url} — "
-            "ask the engine owner to start it, or set host/port in ~/.ude/config.yml"
-        )
+        # API not running and we can't start it (not the engine owner)
+        # This means the user needs to point their CLI at a running engine
+        console.print()
+        print_error(f"API not reachable at {cfg.api_base_url}")
+        console.print()
+        console.print("  [bold]To fix this, edit [info]~/.ude/config.yml[/info] and set:[/bold]")
+        console.print()
+        console.print("    [muted]host:[/muted]  [info]<engine-host>[/info]    [muted]# IP or hostname of the UDE engine[/muted]")
+        console.print("    [muted]port:[/muted]  [info]8000[/info]             [muted]# or 8443 if engine uses HTTPS[/muted]")
+        console.print()
+        console.print("  [muted]If you are running your own engine:[/muted]")
+        console.print("    git clone https://github.com/tycoach/unified-data-engine")
+        console.print("    cd unified-data-engine && pip install -e '.[dev]'")
+        console.print("    ude up")
+        console.print()
+        raise typer.Exit(code=1)
 
     # ── Step 5: Streamlit UI ──────────────────────────────────────────────────
     _step(5, 6, "Streamlit UI", "operator dashboard")
