@@ -604,21 +604,84 @@ def _provision(cfg) -> None:
 
 
 def _ensure_dbt_deps() -> None:
-    """Install dbt packages — skip if already installed."""
+    """
+    Ensure dbt is installed and dbt packages are up to date.
+
+    Works for all install methods:
+      - pipx install unified-data-engine  (no venv, dbt auto-installed)
+      - pip install unified-data-engine   (venv, dbt auto-installed)
+      - pip install -e ".[dev]"           (engine dev, dbt already present)
+
+    Uses sys.executable to install dbt into whichever Python environment
+    is running the CLI — pipx venv, user venv, or system Python.
+    """
+    import shutil
+
+    dbt_bin = shutil.which("dbt")
+
+    # dbt not found — install it into the current Python environment
+    if not dbt_bin:
+        print_info("dbt not found — installing into current environment...")
+        install_result = subprocess.run(
+            [
+                sys.executable, "-m", "pip", "install",
+                "dbt-core>=1.8.0",
+                "dbt-duckdb>=1.8.0",
+                "--quiet",
+                "--disable-pip-version-check",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if install_result.returncode != 0:
+            print_warning(
+                "dbt install failed — some features unavailable. "
+                f"Install manually: pip install dbt-core dbt-duckdb
+"
+                f"{install_result.stderr[:200]}"
+            )
+            return
+
+        # Re-check after install
+        # dbt may be in the same bin dir as sys.executable
+        python_bin_dir = Path(sys.executable).parent
+        dbt_bin = str(python_bin_dir / "dbt")
+        if not Path(dbt_bin).exists():
+            dbt_bin = shutil.which("dbt")
+
+        if dbt_bin:
+            print_success("dbt installed successfully")
+        else:
+            print_warning("dbt installed but not found on PATH — restart your shell if needed")
+            return
+
+    # Skip dbt deps if no dbt/ project directory exists
+    dbt_project = Path("dbt")
+    if not dbt_project.exists():
+        print_success("dbt ready (no dbt/ project directory — skipping deps)")
+        return
+
+    # Skip if packages already installed
     packages_dir = Path("dbt/dbt_packages")
     if packages_dir.exists() and any(packages_dir.iterdir()):
         print_success("dbt packages already installed — skipping")
         return
 
+    # Install dbt packages
     print_info("Installing dbt packages...")
     result = subprocess.run(
-        ["dbt", "deps", "--project-dir", "dbt", "--profiles-dir", "dbt", "--quiet"],
-        capture_output=True, text=True, timeout=60,
+        [dbt_bin, "deps",
+         "--project-dir", "dbt",
+         "--profiles-dir", "dbt",
+         "--quiet"],
+        capture_output=True, text=True, timeout=120,
     )
     if result.returncode == 0:
         print_success("dbt packages installed")
     else:
-        print_warning("dbt deps failed (network issue?) — continuing. Run: ude dbt run to retry.")
+        print_warning(
+            "dbt deps failed (network issue?) — continuing without packages. "
+            "Run: ude dbt run to retry."
+        )
 
 
 def _start_api() -> None:
