@@ -176,7 +176,8 @@ def up(ctx: typer.Context) -> None:
 
     # ── Step 4: FastAPI ───────────────────────────────────────────────────────
     _step(4, 6, "FastAPI", "control plane API")
-    if _port_open(8000):
+    api_port = cfg.port if cfg.port else 8000
+    if _port_open(api_port):
         print_success(f"API already running at {cfg.api_base_url}")
     elif _is_engine_owner():
         _start_api()
@@ -223,7 +224,7 @@ def up(ctx: typer.Context) -> None:
         f"[success]✓[/success] UDE stack is up.\n\n"
         f"  API       → [bold]{cfg.api_base_url}/docs[/bold]\n"
         f"  Dashboard → [bold]http://localhost:8501[/bold]\n"
-        f"  Grafana   → [bold]http://localhost:3000[/bold]  [muted](admin / admin)[/muted]\n\n"
+        f"  Grafana   → [bold]http://localhost:3000[/bold]  [muted](admin / {_get_or_create_grafana_password()})[/muted]\n\n"
         f"  Run: [bold]ude status[/bold] to verify all components\n"
         f"  Run: [bold]ude observe watch[/bold] for live batch feed",
         title="[bold]Stack ready[/bold]",
@@ -274,7 +275,7 @@ def status(ctx: typer.Context) -> None:
     rows = [
         ("API stack",  stack_is_running(cfg),          f"{cfg.api_base_url}/health"),
         ("MiniSky",    minisky_is_alive(cfg),           cfg.minisky_url),
-        ("dbt",        shutil.which("dbt") is not None, "on PATH"),
+        ("dbt",        _dbt_available(), "on PATH"),
         ("Prometheus", _port_open(9090),               "http://localhost:9090"),
         ("Grafana",    _port_open(3000),               "http://localhost:3000"),
         ("Streamlit",  _port_open(8501),               "http://localhost:8501"),
@@ -417,6 +418,16 @@ def init(ctx: typer.Context) -> None:
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+def _dbt_available() -> bool:
+    """Check if dbt is available — checks PATH and pipx/venv bin directory."""
+    import shutil
+    if shutil.which("dbt"):
+        return True
+    # Check in same bin dir as sys.executable (pipx venv)
+    dbt_in_venv = Path(sys.executable).parent / "dbt"
+    return dbt_in_venv.exists()
+
 
 def _is_engine_owner() -> bool:
     """
