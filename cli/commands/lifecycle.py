@@ -212,15 +212,13 @@ def up(ctx: typer.Context) -> None:
     _step(5, 6, "Streamlit UI", "operator dashboard")
     if _port_open(8501):
         print_success("Streamlit already running at :8501")
-    elif _is_engine_owner():
+    else:
         _start_streamlit()
-        ok = _wait_for_port(8501, timeout=15, label="Streamlit")
+        ok = _wait_for_port(8501, timeout=20, label="Streamlit")
         if ok:
             print_success("Streamlit ready at http://localhost:8501")
         else:
             print_warning("Streamlit slow to start — check with: ude status")
-    else:
-        print_info("Streamlit UI runs on the engine host — skipping")
 
     # ── Step 6: Monitoring stack ──────────────────────────────────────────────
     _step(6, 6, "Monitoring", "Prometheus + Pushgateway + Grafana + dashboards")
@@ -525,7 +523,7 @@ def _wait_for_url(url: str, timeout: int = 15, label: str = "", interval: float 
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            r = httpx.get(url, timeout=2.0, follow_redirects=True)
+            r = httpx.get(url, timeout=2.0, follow_redirects=True, verify=False)
             if r.status_code < 400:
                 return True
         except Exception:
@@ -808,30 +806,53 @@ def _get_api_port() -> int:
 
 
 def _start_streamlit() -> None:
-    python    = sys.executable
-    env       = os.environ.copy()
-    env["PYTHONPATH"] = str(Path.cwd())
-    streamlit = Path(python).parent / "streamlit"
+    python = sys.executable
+    env    = os.environ.copy()
 
+    # Find ui/app.py — check cwd first, then installed package
+    ui_path = Path("ui/app.py")
+    if ui_path.exists():
+        env["PYTHONPATH"] = str(Path.cwd())
+    else:
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec("ui.app")
+            if spec and spec.origin:
+                ui_path = Path(spec.origin)
+                env["PYTHONPATH"] = str(Path(spec.origin).parent.parent)
+            else:
+                print_success("Streamlit UI — not available in this environment")
+                return
+        except Exception:
+            print_success("Streamlit UI — not available in this environment")
+            return
+
+    # Find or install streamlit binary
+    streamlit = Path(python).parent / "streamlit"
     if not streamlit.exists():
         import shutil
         found = shutil.which("streamlit")
         if not found:
-            print_warning("streamlit not found — skipping UI")
-            return
-        streamlit = Path(found)
-
-    ui_path = Path("ui/app.py")
-    if not ui_path.exists():
-        print_warning("ui/app.py not found — skipping UI")
-        return
+            print_info("Installing Streamlit...")
+            subprocess.run(
+                [python, "-m", "pip", "install", "streamlit>=1.35.0",
+                 "--quiet", "--disable-pip-version-check"],
+                capture_output=True, timeout=120,
+            )
+            streamlit = Path(python).parent / "streamlit"
+            if not streamlit.exists():
+                print_warning("streamlit not found — skipping UI")
+                return
+        else:
+            streamlit = Path(found)
 
     subprocess.Popen(
         [str(streamlit), "run", str(ui_path),
-         "--server.port", "8501", "--server.address", "0.0.0.0",
+         "--server.port", "8501",
+         "--server.address", "0.0.0.0",
          "--server.headless", "true"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        env=env, cwd=str(Path.cwd()),
+        env=env, cwd=str(Path(ui_path).parent.parent),
     )
 
 

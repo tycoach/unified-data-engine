@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unified-data-engine"
-version = "3.2.0"
+version = "3.2.1"
 description = "A GCP-native, dbt-powered micro-batch data pipeline engine"
 readme = "Readme.md"
 license = { text = "MIT" }
@@ -66,7 +66,7 @@ Repository = "https://github.com/tycoach/unified-data-engine"
 Issues = "https://github.com/tycoach/unified-data-engine/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["cli", "api", "engine", "config"]
+packages = ["cli", "api", "engine", "config", "ui"]
 
 [tool.hatch.build.targets.wheel.shared-data]
 # Include dashboard JSON files as package data inside the cli package
