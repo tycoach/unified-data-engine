@@ -635,9 +635,7 @@ def _ensure_dbt_deps() -> None:
         if install_result.returncode != 0:
             print_warning(
                 "dbt install failed — some features unavailable. "
-                f"Install manually: pip install dbt-core dbt-duckdb
-"
-                f"{install_result.stderr[:200]}"
+                "Install manually: pip install dbt-core dbt-duckdb"
             )
             return
 
