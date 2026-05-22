@@ -443,11 +443,26 @@ def _dbt_available() -> bool:
 
 def _is_engine_owner() -> bool:
     """
-    True if running from the engine repo (has api/ and engine/ directories).
-    False for 3rd party pip users who only have the CLI installed.
+    True if the UDE engine API is available — either:
+      1. Running from the engine repo (api/main.py in cwd), or
+      2. api.main is importable from the installed pip/pipx package
+
+    This means pip/pipx users ARE the engine owner — the package
+    ships with api/main.py and can start its own API server.
+    No repo clone required.
     """
+    # Check 1: running from engine repo (dev/contributor context)
     cwd = Path.cwd()
-    return (cwd / "api" / "main.py").exists() and (cwd / "engine" / "main.py").exists()
+    if (cwd / "api" / "main.py").exists():
+        return True
+
+    # Check 2: api.main is importable from installed package (pip/pipx)
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("api.main")
+        return spec is not None
+    except Exception:
+        return False
 
 
 def _get_or_create_grafana_password() -> str:
@@ -707,24 +722,75 @@ def _ensure_dbt_deps() -> None:
 
 def _start_api() -> None:
     python = sys.executable
-    cmd    = [
+    port   = _get_api_port()
+
+    # Ensure uvicorn + API dependencies are installed in current environment
+    _ensure_api_deps()
+
+    cmd = [
         python, "-m", "uvicorn", "api.main:app",
         "--host", "0.0.0.0",
-        "--port", str(_get_api_port()),
+        "--port", str(port),
         "--log-level", "warning",
     ]
-    # Add TLS args if configured
+
+    # Add TLS args if cert exists
     tls_cert = Path.home() / ".ude" / "tls" / "server.crt"
     tls_key  = Path.home() / ".ude" / "tls" / "server.key"
     if tls_cert.exists() and tls_key.exists():
         cmd += ["--ssl-certfile", str(tls_cert), "--ssl-keyfile", str(tls_key)]
         print_info("HTTPS enabled — TLS certificate loaded")
 
+    # Find the directory containing api/main.py
+    # Works for both repo (cwd) and pip/pipx installs (site-packages)
+    cwd = Path.cwd()
+    if (cwd / "api" / "main.py").exists():
+        api_cwd = str(cwd)
+    else:
+        try:
+            import importlib.util
+            spec    = importlib.util.find_spec("api.main")
+            api_cwd = str(Path(spec.origin).parent.parent)
+        except Exception:
+            api_cwd = str(cwd)
+
     subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        cwd=str(Path.cwd()),
+        cwd=api_cwd,
     )
+
+
+def _ensure_api_deps() -> None:
+    """
+    Ensure uvicorn + FastAPI deps are installed in the current environment.
+    Required for pipx users where uvicorn is not bundled by default.
+    Uses sys.executable so packages land in the pipx venv.
+    """
+    import shutil
+    if shutil.which("uvicorn") or (Path(sys.executable).parent / "uvicorn").exists():
+        return
+
+    print_info("Installing API server dependencies...")
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pip", "install",
+            "uvicorn[standard]>=0.29.0",
+            "fastapi>=0.111.0",
+            "prometheus-client>=0.20.0",
+            "python-multipart>=0.0.9",
+            "--quiet",
+            "--disable-pip-version-check",
+        ],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode == 0:
+        print_success("API server dependencies installed")
+    else:
+        print_warning(
+            "Could not install API dependencies. "
+            "Install manually: pip install uvicorn fastapi"
+        )
 
 
 def _get_api_port() -> int:
