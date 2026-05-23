@@ -101,7 +101,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
         # Inject identity
         explicit_token = request.headers.get("X-UDE-Project", "")
-        project_token  = "__engine__" if explicit_token == "__engine__" else record.get("project_token", "")
+        project_token  = explicit_token if explicit_token else record.get("project_token", "")
 
         request.state.project_token = project_token
         request.state.email         = record.get("email", "")

@@ -16,7 +16,11 @@ from datetime import datetime, timezone
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-STATE_DIR = Path(".state")
+# State directory — absolute path so it works regardless of cwd
+# This ensures the pipx-installed API and the engine repo both
+# read from the same location
+STATE_DIR = Path.home() / ".ude" / "state"
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class BigtableClient:
