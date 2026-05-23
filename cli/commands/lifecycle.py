@@ -168,6 +168,7 @@ def up(ctx: typer.Context) -> None:
 
     # ── Step 2: Provision ─────────────────────────────────────────────────────
     _step(2, 6, "Provisioning", "Pub/Sub topics + BigQuery datasets")
+    _migrate_state_dir()  # one-time migration from .state/ to ~/.ude/state/
     _provision(cfg)
 
     # ── Step 3: dbt deps ──────────────────────────────────────────────────────
@@ -535,6 +536,34 @@ def _wait_for_url(url: str, timeout: int = 15, label: str = "", interval: float 
 
 def _bg(cmd: str) -> None:
     subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _migrate_state_dir() -> None:
+    """
+    One-time migration: copy state files from old .state/ (relative to cwd)
+    to new ~/.ude/state/ (absolute path).
+
+    Safe to run on every startup — skips if already migrated or no old state.
+    """
+    import shutil as _shutil
+
+    old_state = Path.cwd() / ".state"
+    new_state  = Path.home() / ".ude" / "state"
+
+    if not old_state.exists():
+        return
+
+    new_state.mkdir(parents=True, exist_ok=True)
+
+    migrated = 0
+    for f in old_state.glob("*.json"):
+        dest = new_state / f.name
+        if not dest.exists():
+            _shutil.copy2(f, dest)
+            migrated += 1
+
+    if migrated > 0:
+        logger.info(f"[Main] Migrated {migrated} state files from .state/ to ~/.ude/state/")
 
 
 def _provision(cfg) -> None:

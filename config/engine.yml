@@ -29,7 +29,7 @@ dbt:
 
 state:
   schema_registry_dir: .schema_registry
-  state_dir: .state
+  state_dir: ~/.ude/state
 
 api:
   host: 0.0.0.0
