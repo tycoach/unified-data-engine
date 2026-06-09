@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unified-data-engine"
-version = "3.2.4"
+version = "3.2.5"
 description = "A GCP-native, dbt-powered micro-batch data pipeline engine"
 readme = "Readme.md"
 license = { text = "MIT" }
