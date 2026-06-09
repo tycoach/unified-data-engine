@@ -159,12 +159,9 @@ def up(ctx: typer.Context) -> None:
     if _port_open(8080):
         print_success("MiniSky already running at :8080")
     else:
-        _bg("minisky start")
-        ok = _wait_for_port(8080, timeout=20, label="MiniSky")
+        ok = _start_minisky()
         if not ok:
-            print_error("MiniSky failed to start. Check Docker is running.")
             raise typer.Exit(code=1)
-        print_success("MiniSky ready at http://localhost:8080")
 
     # ── Step 2: Provision ─────────────────────────────────────────────────────
     _step(2, 6, "Provisioning", "Pub/Sub topics + BigQuery datasets")
@@ -382,9 +379,10 @@ def init(ctx: typer.Context) -> None:
     console.print()
 
     project_name = typer.prompt("Project name", default=cwd.name)
+    import click as _click
     env = typer.prompt(
         "Environment", default="local",
-        type=typer.Choice(["local", "staging", "production"]),
+        type=_click.Choice(["local", "staging", "production"]),
     )
     gcp_project = typer.prompt(
         "GCP project ID (leave blank for MiniSky local dev)", default=""
@@ -532,6 +530,144 @@ def _wait_for_url(url: str, timeout: int = 15, label: str = "", interval: float 
         time.sleep(interval)
     print_warning(f"{label} not ready after {timeout}s")
     return False
+
+
+def _start_minisky() -> bool:
+    """
+    Start MiniSky — auto-installs if not found.
+
+    1. Binary on PATH → minisky start
+    2. Binary not found → download + install from GitHub releases
+    3. Install failed → clear instructions
+    """
+    import shutil
+
+    # Path 1: binary already installed
+    if shutil.which("minisky"):
+        print_info("Starting MiniSky...")
+        _bg("minisky start")
+        ok = _wait_for_port(8080, timeout=20, label="MiniSky")
+        if ok:
+            print_success("MiniSky ready at http://localhost:8080")
+            return True
+        print_error("MiniSky failed to start.")
+        return False
+
+    # Path 2: auto-install from GitHub releases
+    print_info("MiniSky not installed — downloading and installing...")
+    installed = _install_minisky()
+    if not installed:
+        _minisky_install_instructions()
+        return False
+
+    # Start after install
+    _bg("minisky start")
+    ok = _wait_for_port(8080, timeout=30, label="MiniSky")
+    if ok:
+        print_success("MiniSky installed and ready at http://localhost:8080")
+        return True
+
+    print_error("MiniSky installed but failed to start.")
+    _minisky_install_instructions()
+    return False
+
+
+def _install_minisky() -> bool:
+    """
+    Download and install the MiniSky binary from GitHub releases.
+    Installs to /usr/local/bin/minisky (requires sudo) or ~/.local/bin/minisky.
+    Returns True on success.
+    """
+    import platform
+    import shutil
+    import tarfile
+    import urllib.request
+
+    os_name = platform.system().lower()
+    machine  = platform.machine().lower()
+
+    arch = "amd64" if machine in ("x86_64", "amd64") else "arm64"
+
+    # Get latest version from GitHub API
+    try:
+        req  = urllib.request.Request(
+            "https://api.github.com/repos/qamarudeenm/minisky/releases/latest",
+            headers={"User-Agent": "ude-cli"},
+        )
+        resp    = urllib.request.urlopen(req, timeout=10)
+        import json
+        data    = json.loads(resp.read())
+        version = data.get("tag_name", "")
+        if not version:
+            logger.warning("[MiniSky] Could not detect latest version")
+            return False
+    except Exception as exc:
+        logger.warning(f"[MiniSky] GitHub API error: {exc}")
+        return False
+
+    # Download binary
+    ext          = "tar.gz"
+    download_url = (
+        f"https://github.com/qamarudeenm/minisky/releases/download/"
+        f"{version}/minisky_{os_name}_{arch}.{ext}"
+    )
+
+    print_info(f"Downloading MiniSky {version}...")
+    try:
+        tmp_archive = Path("/tmp/minisky.tar.gz")
+        urllib.request.urlretrieve(download_url, tmp_archive)
+    except Exception as exc:
+        logger.warning(f"[MiniSky] Download failed: {exc}")
+        return False
+
+    # Extract binary
+    try:
+        with tarfile.open(tmp_archive) as tar:
+            tar.extract("minisky", path="/tmp/")
+        tmp_binary = Path("/tmp/minisky")
+        tmp_binary.chmod(0o755)
+    except Exception as exc:
+        logger.warning(f"[MiniSky] Extraction failed: {exc}")
+        return False
+
+    # Install — try /usr/local/bin first, fall back to ~/.local/bin
+    for install_dir in [Path("/usr/local/bin"), Path.home() / ".local" / "bin"]:
+        try:
+            install_dir.mkdir(parents=True, exist_ok=True)
+            dest = install_dir / "minisky"
+            import shutil as _shutil
+            _shutil.copy2(tmp_binary, dest)
+            dest.chmod(0o755)
+
+            # Add ~/.local/bin to PATH for this process if needed
+            if str(install_dir) not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{install_dir}:{os.environ.get('PATH', '')}"
+
+            print_success(f"MiniSky {version} installed to {dest}")
+            tmp_archive.unlink(missing_ok=True)
+            tmp_binary.unlink(missing_ok=True)
+            return True
+        except PermissionError:
+            continue
+        except Exception as exc:
+            logger.warning(f"[MiniSky] Install to {install_dir} failed: {exc}")
+            continue
+
+    return False
+
+
+def _minisky_install_instructions() -> None:
+    console.print()
+    print_error("MiniSky is not installed and Docker is not running.")
+    console.print()
+    console.print("  [bold]Option A — Install MiniSky:[/bold]")
+    console.print("    [muted]curl -sSL https://minisky.bmics.com.ng/install.sh | sh[/muted]")
+    console.print("    [muted]Then run: ude up[/muted]")
+    console.print()
+    console.print("  [bold]Option B — Start Docker Desktop first:[/bold]")
+    console.print("    [muted]Start Docker Desktop, then run: ude up[/muted]")
+    console.print("    [muted]UDE will pull and run MiniSky automatically.[/muted]")
+    console.print()
 
 
 def _bg(cmd: str) -> None:
@@ -862,16 +998,16 @@ def _start_streamlit() -> None:
         import shutil
         found = shutil.which("streamlit")
         if not found:
-            print_info("Installing Streamlit...")
-            subprocess.run(
+            print_info("Installing Streamlit in background...")
+            # Run install in background — don't block startup
+            subprocess.Popen(
                 [python, "-m", "pip", "install", "streamlit>=1.35.0",
                  "--quiet", "--disable-pip-version-check"],
-                capture_output=True, timeout=120,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            streamlit = Path(python).parent / "streamlit"
-            if not streamlit.exists():
-                print_warning("streamlit not found — skipping UI")
-                return
+            print_warning("Streamlit installing in background — UI will be available shortly.")
+            print_info("Run: ude up again once install completes.")
+            return
         else:
             streamlit = Path(found)
 
@@ -905,7 +1041,7 @@ def _start_monitoring() -> None:
 
     result = subprocess.run(
         ["docker", "compose", "-f", str(_MONITORING_COMPOSE_PATH), "up", "-d"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=300,  # 5 min for slow networks / first pull
     )
 
     if result.returncode != 0:

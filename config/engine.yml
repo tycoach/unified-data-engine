@@ -1,40 +1,41 @@
+
 # config/engine.yml
-# Global engine settings
-# Pipeline-level settings override these defaults
+
+project: ude-dev-test
+environment: local           # local | staging | production
+
+gcp:
+  project_id: 12345
+  emulator_host: localhost:9099  # MiniSky local GCP emulator
+
+pubsub:
+  batch_window_seconds: 30       # micro-batch collection window
+  max_messages_per_pull: 1000
+
+bigquery:
+  staging_dataset: raw_staging
+  quarantine_dataset: quarantine
+
+dbt:
+  project_dir: dbt/
+  profiles_dir: dbt/
+  target: "dev"
 
 engine:
   batch_window_seconds: 30
-  loop_sleep_seconds: 1
-  project_id: local-dev-project
-  environment: local              # local | production
-
-pubsub:
-  endpoint: http://localhost:8080
-  ack_deadline_seconds: 60
-  message_retention: 86400s
-
-bigquery:
-  endpoint: http://localhost:8080
-  location: US
-  datasets:
-    raw_staging: raw_staging
-    snapshots: snapshots
-    marts: marts
-    quarantine: quarantine
-
-dbt:
-  target: dev
-  project_dir: ./dbt
-  profiles_dir: ./dbt
-
-state:
-  schema_registry_dir: .schema_registry
-  state_dir: ~/.ude/state
+  null_threshold: 0.05           # default — overridable per pipeline
+  late_arrival_window: 24h
+  duplicate_window: 30m
+  edge_case_mode: quarantine     # quarantine | skip | fail
 
 api:
   host: 0.0.0.0
   port: 8000
 
-ui:
-  host: 0.0.0.0
-  port: 8501
+metrics:
+  pushgateway_url: http://localhost:9091
+  scrape_interval_seconds: 15
+
+logging:
+  level: INFO                    # DEBUG | INFO | WARNING | ERROR
+  format: json                   # json | text

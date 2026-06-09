@@ -1,17 +1,16 @@
-unified_data_engine:
-  target: dev
+ude_dev_test:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
   outputs:
     dev:
       type: duckdb
-      path: /tmp/unified_data_engine_dev.duckdb
+      path: /tmp/ude_dev_test_dev.duckdb
       threads: 4
-      schema: main
 
     prod:
       type: bigquery
       method: oauth
-      project: local-dev-project
-      dataset: marts
+      project: 12345
+      dataset: dbt_prod
       threads: 4
       timeout_seconds: 300
       location: US

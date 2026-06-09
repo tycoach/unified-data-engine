@@ -1,7 +1,6 @@
-name: unified_data_engine
+name: ude_dev_test
 version: '2.0.0'
-
-profile: unified_data_engine
+config-version: 2
 
 model-paths: ['models']
 snapshot-paths: ['snapshots']
@@ -9,11 +8,8 @@ test-paths: ['tests']
 macro-paths: ['macros']
 analysis-paths: ['analyses']
 
-target-path: 'target'
-clean-targets: ['target', 'dbt_packages']
-
 models:
-  unified_data_engine:
+  ude_dev_test:
     staging:
       +materialized: view
       +schema: staging
@@ -22,7 +18,7 @@ models:
       +schema: marts
 
 snapshots:
-  unified_data_engine:
+  ude_dev_test:
     +target_schema: snapshots
     +strategy: timestamp
 
