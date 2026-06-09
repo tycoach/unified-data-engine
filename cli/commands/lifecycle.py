@@ -599,37 +599,85 @@ def _install_minisky() -> bool:
         data    = json.loads(resp.read())
         version = data.get("tag_name", "")
         if not version:
-            logger.warning("[MiniSky] Could not detect latest version")
+            print_warning("[MiniSky] Could not detect latest version")
             return False
     except Exception as exc:
-        logger.warning(f"[MiniSky] GitHub API error: {exc}")
+        print_warning(f"[MiniSky] GitHub API error: {exc}")
         return False
 
-    # Download binary
-    ext          = "tar.gz"
-    download_url = (
-        f"https://github.com/qamarudeenm/minisky/releases/download/"
-        f"{version}/minisky_{os_name}_{arch}.{ext}"
-    )
+    # Determine correct extension — Windows uses .zip, others .tar.gz
+    is_windows   = os_name == "windows"
+    ext          = "zip" if is_windows else "tar.gz"
+
+    # Find asset URL from GitHub release assets
+    assets       = data.get("assets", [])
+    download_url = None
+    for asset in assets:
+        aname = asset["name"].lower()
+        if os_name in aname and arch in aname and aname.endswith(ext):
+            download_url = asset["browser_download_url"]
+            break
+
+    # Fallback to constructed URL
+    if not download_url:
+        download_url = (
+            f"https://github.com/qamarudeenm/minisky/releases/download/"
+            f"{version}/minisky_{os_name}_{arch}.{ext}"
+        )
 
     print_info(f"Downloading MiniSky {version}...")
+    print_info(f"URL: {download_url}")
+
     try:
         import tempfile
         tmp_dir     = Path(tempfile.gettempdir())
         tmp_archive = tmp_dir / f"minisky.{ext}"
         urllib.request.urlretrieve(download_url, tmp_archive)
     except Exception as exc:
-        logger.warning(f"[MiniSky] Download failed: {exc}")
+        asset_names = [a["name"] for a in assets]
+        print_warning(f"[MiniSky] Download failed: {exc}")
+        print_warning(f"[MiniSky] Available assets: {asset_names}")
         return False
 
-    # Extract binary
+    # Extract binary — .zip for Windows, .tar.gz for others
     try:
-        with tarfile.open(tmp_archive) as tar:
-            tar.extract("minisky", path="/tmp/")
-        tmp_binary = Path("/tmp/minisky")
-        tmp_binary.chmod(0o755)
+        import tempfile as _tmpmod
+        tmp_binary = Path(_tmpmod.gettempdir()) / "minisky_extracted"
+        if is_windows:
+            import zipfile
+            with zipfile.ZipFile(tmp_archive) as zf:
+                members  = zf.namelist()
+                bin_name = next(
+                    (m for m in members
+                     if "minisky" in m.lower() and not m.endswith("/")),
+                    None,
+                )
+                if not bin_name:
+                    print_warning("[MiniSky] Binary not found in zip archive")
+                    return False
+                zf.extract(bin_name, path=str(tmp_dir))
+                extracted = tmp_dir / bin_name
+        else:
+            with tarfile.open(tmp_archive) as tar:
+                members       = tar.getnames()
+                binary_member = next(
+                    (m for m in members
+                     if "minisky" in m.lower() and not m.endswith("/")),
+                    None,
+                )
+                if binary_member:
+                    tar.extract(binary_member, path=str(tmp_dir))
+                    extracted = tmp_dir / binary_member
+                else:
+                    tar.extract("minisky", path=str(tmp_dir))
+                    extracted = tmp_dir / "minisky"
+
+        extracted.chmod(0o755)
+        if tmp_binary.exists():
+            tmp_binary.unlink()
+        extracted.rename(tmp_binary)
     except Exception as exc:
-        logger.warning(f"[MiniSky] Extraction failed: {exc}")
+        print_warning(f"[MiniSky] Extraction failed: {exc}")
         return False
 
     # Install — try /usr/local/bin first, fall back to ~/.local/bin
@@ -641,21 +689,24 @@ def _install_minisky() -> bool:
             _shutil.copy2(tmp_binary, dest)
             dest.chmod(0o755)
 
-            # Add ~/.local/bin to PATH for this process if needed
             if str(install_dir) not in os.environ.get("PATH", ""):
                 os.environ["PATH"] = f"{install_dir}:{os.environ.get('PATH', '')}"
 
             print_success(f"MiniSky {version} installed to {dest}")
-            tmp_archive.unlink(missing_ok=True)
-            tmp_binary.unlink(missing_ok=True)
+            try:
+                tmp_archive.unlink()
+                tmp_binary.unlink()
+            except Exception:
+                pass
             return True
         except PermissionError:
             continue
         except Exception as exc:
-            logger.warning(f"[MiniSky] Install to {install_dir} failed: {exc}")
+            print_warning(f"[MiniSky] Install to {install_dir} failed: {exc}")
             continue
 
     return False
+
 
 
 def _minisky_install_instructions() -> None:
