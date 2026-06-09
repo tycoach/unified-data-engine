@@ -614,7 +614,9 @@ def _install_minisky() -> bool:
 
     print_info(f"Downloading MiniSky {version}...")
     try:
-        tmp_archive = Path("/tmp/minisky.tar.gz")
+        import tempfile
+        tmp_dir     = Path(tempfile.gettempdir())
+        tmp_archive = tmp_dir / f"minisky.{ext}"
         urllib.request.urlretrieve(download_url, tmp_archive)
     except Exception as exc:
         logger.warning(f"[MiniSky] Download failed: {exc}")
